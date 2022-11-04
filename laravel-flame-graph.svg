@@ -1,0 +1,2469 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="342" onload="init(evt)" viewBox="0 0 1200 342" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="342.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="325" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="325" > </text>
+<g id="frames">
+<g >
+<title>pack_plat_log (11 samples, 0.01%)</title><rect x="537.7" y="101" width="0.1" height="15.0" fill="rgb(246,222,50)" rx="2" ry="2" />
+<text  x="540.67" y="111.5" ></text>
+</g>
+<g >
+<title>gettimeofday (11 samples, 0.01%)</title><rect x="589.1" y="165" width="0.1" height="15.0" fill="rgb(211,218,29)" rx="2" ry="2" />
+<text  x="592.06" y="175.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (17 samples, 0.02%)</title><rect x="547.2" y="37" width="0.2" height="15.0" fill="rgb(228,106,22)" rx="2" ry="2" />
+<text  x="550.15" y="47.5" ></text>
+</g>
+<g >
+<title>socket_create (9 samples, 0.01%)</title><rect x="435.9" y="117" width="0.1" height="15.0" fill="rgb(250,58,44)" rx="2" ry="2" />
+<text  x="438.87" y="127.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (21 samples, 0.03%)</title><rect x="420.2" y="133" width="0.4" height="15.0" fill="rgb(234,46,33)" rx="2" ry="2" />
+<text  x="423.24" y="143.5" ></text>
+</g>
+<g >
+<title>substr (25 samples, 0.03%)</title><rect x="830.2" y="197" width="0.3" height="15.0" fill="rgb(246,96,30)" rx="2" ry="2" />
+<text  x="833.16" y="207.5" ></text>
+</g>
+<g >
+<title>iconv (43 samples, 0.06%)</title><rect x="527.5" y="133" width="0.7" height="15.0" fill="rgb(233,118,34)" rx="2" ry="2" />
+<text  x="530.50" y="143.5" ></text>
+</g>
+<g >
+<title>json_encode (10 samples, 0.01%)</title><rect x="712.2" y="181" width="0.1" height="15.0" fill="rgb(242,36,42)" rx="2" ry="2" />
+<text  x="715.16" y="191.5" ></text>
+</g>
+<g >
+<title>substr (32 samples, 0.04%)</title><rect x="581.6" y="133" width="0.5" height="15.0" fill="rgb(207,169,39)" rx="2" ry="2" />
+<text  x="584.57" y="143.5" ></text>
+</g>
+<g >
+<title>strlen (14 samples, 0.02%)</title><rect x="74.7" y="197" width="0.2" height="15.0" fill="rgb(252,182,33)" rx="2" ry="2" />
+<text  x="77.66" y="207.5" ></text>
+</g>
+<g >
+<title>gettimeofday (8 samples, 0.01%)</title><rect x="707.6" y="149" width="0.2" height="15.0" fill="rgb(232,189,29)" rx="2" ry="2" />
+<text  x="710.64" y="159.5" ></text>
+</g>
+<g >
+<title>strtolower (9 samples, 0.01%)</title><rect x="57.6" y="229" width="0.2" height="15.0" fill="rgb(226,140,0)" rx="2" ry="2" />
+<text  x="60.62" y="239.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (35 samples, 0.05%)</title><rect x="690.5" y="133" width="0.5" height="15.0" fill="rgb(241,203,47)" rx="2" ry="2" />
+<text  x="693.51" y="143.5" ></text>
+</g>
+<g >
+<title>constant (10 samples, 0.01%)</title><rect x="834.9" y="149" width="0.1" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="837.89" y="159.5" ></text>
+</g>
+<g >
+<title>date (9 samples, 0.01%)</title><rect x="440.2" y="85" width="0.1" height="15.0" fill="rgb(236,15,33)" rx="2" ry="2" />
+<text  x="443.19" y="95.5" ></text>
+</g>
+<g >
+<title>is_file (14 samples, 0.02%)</title><rect x="543.9" y="69" width="0.3" height="15.0" fill="rgb(233,33,27)" rx="2" ry="2" />
+<text  x="546.95" y="79.5" ></text>
+</g>
+<g >
+<title>json_encode (36 samples, 0.05%)</title><rect x="725.3" y="197" width="0.6" height="15.0" fill="rgb(214,173,5)" rx="2" ry="2" />
+<text  x="728.35" y="207.5" ></text>
+</g>
+<g >
+<title>socket_sendto (20 samples, 0.03%)</title><rect x="574.3" y="165" width="0.3" height="15.0" fill="rgb(246,25,33)" rx="2" ry="2" />
+<text  x="577.27" y="175.5" ></text>
+</g>
+<g >
+<title>fopen (16 samples, 0.02%)</title><rect x="579.2" y="133" width="0.2" height="15.0" fill="rgb(210,207,43)" rx="2" ry="2" />
+<text  x="582.17" y="143.5" ></text>
+</g>
+<g >
+<title>is_file (13 samples, 0.02%)</title><rect x="579.7" y="133" width="0.2" height="15.0" fill="rgb(248,117,50)" rx="2" ry="2" />
+<text  x="582.66" y="143.5" ></text>
+</g>
+<g >
+<title>basename (48 samples, 0.06%)</title><rect x="703.8" y="133" width="0.8" height="15.0" fill="rgb(230,48,15)" rx="2" ry="2" />
+<text  x="706.84" y="143.5" ></text>
+</g>
+<g >
+<title>basename (41 samples, 0.05%)</title><rect x="691.8" y="165" width="0.6" height="15.0" fill="rgb(243,216,26)" rx="2" ry="2" />
+<text  x="694.78" y="175.5" ></text>
+</g>
+<g >
+<title>json_encode (14 samples, 0.02%)</title><rect x="528.6" y="133" width="0.3" height="15.0" fill="rgb(253,87,53)" rx="2" ry="2" />
+<text  x="531.65" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (494 samples, 0.64%)</title><rect x="60.5" y="213" width="7.5" height="15.0" fill="rgb(230,8,24)" rx="2" ry="2" />
+<text  x="63.46" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getAllHeaders (276 samples, 0.36%)</title><rect x="728.8" y="229" width="4.2" height="15.0" fill="rgb(244,89,8)" rx="2" ry="2" />
+<text  x="731.83" y="239.5" ></text>
+</g>
+<g >
+<title>clearstatcache (8 samples, 0.01%)</title><rect x="533.7" y="101" width="0.1" height="15.0" fill="rgb(253,24,51)" rx="2" ry="2" />
+<text  x="536.66" y="111.5" ></text>
+</g>
+<g >
+<title>basename (9 samples, 0.01%)</title><rect x="578.5" y="133" width="0.2" height="15.0" fill="rgb(214,220,1)" rx="2" ry="2" />
+<text  x="581.54" y="143.5" ></text>
+</g>
+<g >
+<title>json_encode (7 samples, 0.01%)</title><rect x="705.1" y="133" width="0.1" height="15.0" fill="rgb(208,127,53)" rx="2" ry="2" />
+<text  x="708.11" y="143.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;DJBase\{closure:/data/website/api7web/htdocs/daoju/v3/api/hx/commphplib/base/BaseApp.class.php:71-91} (1,094 samples, 1.42%)</title><rect x="37.2" y="197" width="16.7" height="15.0" fill="rgb(238,5,28)" rx="2" ry="2" />
+<text  x="40.19" y="207.5" ></text>
+</g>
+<g >
+<title>strlen (25 samples, 0.03%)</title><rect x="688.8" y="149" width="0.3" height="15.0" fill="rgb(238,49,54)" rx="2" ry="2" />
+<text  x="691.75" y="159.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;__construct (2,230 samples, 2.89%)</title><rect x="25.0" y="261" width="34.1" height="15.0" fill="rgb(234,84,18)" rx="2" ry="2" />
+<text  x="28.04" y="271.5" >an..</text>
+</g>
+<g >
+<title>strlen (10 samples, 0.01%)</title><rect x="579.9" y="133" width="0.1" height="15.0" fill="rgb(234,123,53)" rx="2" ry="2" />
+<text  x="582.86" y="143.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (11 samples, 0.01%)</title><rect x="58.8" y="197" width="0.2" height="15.0" fill="rgb(210,39,33)" rx="2" ry="2" />
+<text  x="61.79" y="207.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (14 samples, 0.02%)</title><rect x="537.1" y="101" width="0.2" height="15.0" fill="rgb(222,118,45)" rx="2" ry="2" />
+<text  x="540.12" y="111.5" ></text>
+</g>
+<g >
+<title>shell_exec (5,298 samples, 6.85%)</title><rect x="169.7" y="181" width="80.9" height="15.0" fill="rgb(216,19,15)" rx="2" ry="2" />
+<text  x="172.71" y="191.5" >shell_exec</text>
+</g>
+<g >
+<title>DJBase\Tool::getTestMachine (21 samples, 0.03%)</title><rect x="250.7" y="197" width="0.3" height="15.0" fill="rgb(251,74,39)" rx="2" ry="2" />
+<text  x="253.71" y="207.5" ></text>
+</g>
+<g >
+<title>is_file (12 samples, 0.02%)</title><rect x="698.6" y="117" width="0.2" height="15.0" fill="rgb(236,145,17)" rx="2" ry="2" />
+<text  x="701.62" y="127.5" ></text>
+</g>
+<g >
+<title>gmp_div (33 samples, 0.04%)</title><rect x="566.4" y="165" width="0.5" height="15.0" fill="rgb(207,157,17)" rx="2" ry="2" />
+<text  x="569.41" y="175.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;addReportDtl (26 samples, 0.03%)</title><rect x="28.2" y="229" width="0.4" height="15.0" fill="rgb(230,123,15)" rx="2" ry="2" />
+<text  x="31.18" y="239.5" ></text>
+</g>
+<g >
+<title>require_once (20,519 samples, 26.55%)</title><rect x="876.7" y="229" width="313.3" height="15.0" fill="rgb(232,91,31)" rx="2" ry="2" />
+<text  x="879.74" y="239.5" >require_once</text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (123 samples, 0.16%)</title><rect x="72.3" y="213" width="1.9" height="15.0" fill="rgb(216,84,16)" rx="2" ry="2" />
+<text  x="75.30" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\getMicroSec (26 samples, 0.03%)</title><rect x="526.3" y="133" width="0.4" height="15.0" fill="rgb(239,6,23)" rx="2" ry="2" />
+<text  x="529.34" y="143.5" ></text>
+</g>
+<g >
+<title>is_array (67 samples, 0.09%)</title><rect x="34.4" y="181" width="1.1" height="15.0" fill="rgb(231,5,13)" rx="2" ry="2" />
+<text  x="37.44" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (8 samples, 0.01%)</title><rect x="73.0" y="197" width="0.1" height="15.0" fill="rgb(250,68,39)" rx="2" ry="2" />
+<text  x="75.98" y="207.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (176 samples, 0.23%)</title><rect x="582.1" y="149" width="2.6" height="15.0" fill="rgb(250,213,50)" rx="2" ry="2" />
+<text  x="585.05" y="159.5" ></text>
+</g>
+<g >
+<title>substr (14 samples, 0.02%)</title><rect x="74.9" y="197" width="0.2" height="15.0" fill="rgb(241,48,33)" rx="2" ry="2" />
+<text  x="77.87" y="207.5" ></text>
+</g>
+<g >
+<title>explode (11 samples, 0.01%)</title><rect x="255.2" y="149" width="0.2" height="15.0" fill="rgb(241,100,30)" rx="2" ry="2" />
+<text  x="258.19" y="159.5" ></text>
+</g>
+<g >
+<title>require_once (127 samples, 0.16%)</title><rect x="1180.4" y="165" width="1.9" height="15.0" fill="rgb(219,24,22)" rx="2" ry="2" />
+<text  x="1183.35" y="175.5" ></text>
+</g>
+<g >
+<title>socket_sendto (12 samples, 0.02%)</title><rect x="536.9" y="69" width="0.2" height="15.0" fill="rgb(243,40,18)" rx="2" ry="2" />
+<text  x="539.94" y="79.5" ></text>
+</g>
+<g >
+<title>is_file (11 samples, 0.01%)</title><rect x="680.1" y="181" width="0.2" height="15.0" fill="rgb(221,59,48)" rx="2" ry="2" />
+<text  x="683.11" y="191.5" ></text>
+</g>
+<g >
+<title>http_build_query (22 samples, 0.03%)</title><rect x="56.7" y="229" width="0.3" height="15.0" fill="rgb(217,163,20)" rx="2" ry="2" />
+<text  x="59.66" y="239.5" ></text>
+</g>
+<g >
+<title>explode (7 samples, 0.01%)</title><rect x="67.5" y="197" width="0.1" height="15.0" fill="rgb(221,183,43)" rx="2" ry="2" />
+<text  x="70.48" y="207.5" ></text>
+</g>
+<g >
+<title>basename (25 samples, 0.03%)</title><rect x="537.9" y="117" width="0.4" height="15.0" fill="rgb(213,186,19)" rx="2" ry="2" />
+<text  x="540.90" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (132 samples, 0.17%)</title><rect x="439.2" y="101" width="2.0" height="15.0" fill="rgb(214,114,52)" rx="2" ry="2" />
+<text  x="442.17" y="111.5" ></text>
+</g>
+<g >
+<title>basename (9 samples, 0.01%)</title><rect x="554.8" y="149" width="0.2" height="15.0" fill="rgb(219,168,48)" rx="2" ry="2" />
+<text  x="557.82" y="159.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="553.6" y="117" width="0.1" height="15.0" fill="rgb(207,110,26)" rx="2" ry="2" />
+<text  x="556.57" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (8 samples, 0.01%)</title><rect x="533.4" y="101" width="0.2" height="15.0" fill="rgb(241,63,3)" rx="2" ry="2" />
+<text  x="536.44" y="111.5" ></text>
+</g>
+<g >
+<title>fwrite (7 samples, 0.01%)</title><rect x="63.0" y="181" width="0.1" height="15.0" fill="rgb(243,222,30)" rx="2" ry="2" />
+<text  x="66.04" y="191.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;outputJSON (149 samples, 0.19%)</title><rect x="418.9" y="165" width="2.3" height="15.0" fill="rgb(249,188,49)" rx="2" ry="2" />
+<text  x="421.91" y="175.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="74.1" y="197" width="0.1" height="15.0" fill="rgb(249,120,26)" rx="2" ry="2" />
+<text  x="77.06" y="207.5" ></text>
+</g>
+<g >
+<title>substr (102 samples, 0.13%)</title><rect x="731.2" y="213" width="1.6" height="15.0" fill="rgb(223,103,7)" rx="2" ry="2" />
+<text  x="734.21" y="223.5" ></text>
+</g>
+<g >
+<title>fopen (12 samples, 0.02%)</title><rect x="440.5" y="85" width="0.2" height="15.0" fill="rgb(251,109,27)" rx="2" ry="2" />
+<text  x="443.50" y="95.5" ></text>
+</g>
+<g >
+<title>random_int (20 samples, 0.03%)</title><rect x="682.9" y="181" width="0.3" height="15.0" fill="rgb(254,136,23)" rx="2" ry="2" />
+<text  x="685.91" y="191.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (81 samples, 0.10%)</title><rect x="710.1" y="149" width="1.2" height="15.0" fill="rgb(229,19,20)" rx="2" ry="2" />
+<text  x="713.07" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::calcDjSign (584 samples, 0.76%)</title><rect x="59.7" y="229" width="9.0" height="15.0" fill="rgb(205,24,44)" rx="2" ry="2" />
+<text  x="62.74" y="239.5" ></text>
+</g>
+<g >
+<title>gethostbyname (123 samples, 0.16%)</title><rect x="167.7" y="181" width="1.9" height="15.0" fill="rgb(246,85,38)" rx="2" ry="2" />
+<text  x="170.74" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,651 samples, 7.31%)</title><rect x="79.7" y="213" width="86.3" height="15.0" fill="rgb(254,196,38)" rx="2" ry="2" />
+<text  x="82.68" y="223.5" >DJBase\Too..</text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (138 samples, 0.18%)</title><rect x="535.8" y="117" width="2.1" height="15.0" fill="rgb(233,49,16)" rx="2" ry="2" />
+<text  x="538.79" y="127.5" ></text>
+</g>
+<g >
+<title>gmp_mod (20 samples, 0.03%)</title><rect x="568.1" y="165" width="0.3" height="15.0" fill="rgb(245,61,11)" rx="2" ry="2" />
+<text  x="571.11" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (11 samples, 0.01%)</title><rect x="578.4" y="133" width="0.1" height="15.0" fill="rgb(244,65,10)" rx="2" ry="2" />
+<text  x="581.37" y="143.5" ></text>
+</g>
+<g >
+<title>socket_sendto (12 samples, 0.02%)</title><rect x="76.2" y="165" width="0.2" height="15.0" fill="rgb(239,24,31)" rx="2" ry="2" />
+<text  x="79.17" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (7 samples, 0.01%)</title><rect x="686.6" y="149" width="0.1" height="15.0" fill="rgb(209,5,22)" rx="2" ry="2" />
+<text  x="689.63" y="159.5" ></text>
+</g>
+<g >
+<title>is_numeric (15 samples, 0.02%)</title><rect x="431.9" y="117" width="0.3" height="15.0" fill="rgb(240,88,14)" rx="2" ry="2" />
+<text  x="434.95" y="127.5" ></text>
+</g>
+<g >
+<title>date (9 samples, 0.01%)</title><rect x="697.9" y="117" width="0.1" height="15.0" fill="rgb(210,11,9)" rx="2" ry="2" />
+<text  x="700.90" y="127.5" ></text>
+</g>
+<g >
+<title>explode (14 samples, 0.02%)</title><rect x="81.0" y="197" width="0.2" height="15.0" fill="rgb(242,83,4)" rx="2" ry="2" />
+<text  x="84.02" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;DJBase\{closure:/data/website/api7web/htdocs/daoju/v3/api/hx/commphplib/base/BaseApp.class.php:61-64} (33 samples, 0.04%)</title><rect x="27.7" y="229" width="0.5" height="15.0" fill="rgb(235,45,25)" rx="2" ry="2" />
+<text  x="30.68" y="239.5" ></text>
+</g>
+<g >
+<title>filter_var (23 samples, 0.03%)</title><rect x="167.4" y="181" width="0.3" height="15.0" fill="rgb(246,106,21)" rx="2" ry="2" />
+<text  x="170.39" y="191.5" ></text>
+</g>
+<g >
+<title>preg_match (12 samples, 0.02%)</title><rect x="420.9" y="149" width="0.2" height="15.0" fill="rgb(250,38,20)" rx="2" ry="2" />
+<text  x="423.91" y="159.5" ></text>
+</g>
+<g >
+<title>ams_load (20,043 samples, 25.93%)</title><rect x="879.2" y="213" width="306.0" height="15.0" fill="rgb(228,72,6)" rx="2" ry="2" />
+<text  x="882.23" y="223.5" >ams_load</text>
+</g>
+<g >
+<title>substr (23 samples, 0.03%)</title><rect x="442.4" y="85" width="0.3" height="15.0" fill="rgb(246,97,5)" rx="2" ry="2" />
+<text  x="445.39" y="95.5" ></text>
+</g>
+<g >
+<title>str_replace (26 samples, 0.03%)</title><rect x="730.6" y="213" width="0.4" height="15.0" fill="rgb(252,116,34)" rx="2" ry="2" />
+<text  x="733.57" y="223.5" ></text>
+</g>
+<g >
+<title>L5ApiGetRoute (155 samples, 0.20%)</title><rect x="446.6" y="117" width="2.4" height="15.0" fill="rgb(236,78,41)" rx="2" ry="2" />
+<text  x="449.62" y="127.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (12 samples, 0.02%)</title><rect x="65.6" y="149" width="0.2" height="15.0" fill="rgb(220,223,39)" rx="2" ry="2" />
+<text  x="68.63" y="159.5" ></text>
+</g>
+<g >
+<title>register_shutdown_function (14 samples, 0.02%)</title><rect x="57.0" y="229" width="0.2" height="15.0" fill="rgb(235,66,18)" rx="2" ry="2" />
+<text  x="59.99" y="239.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (18 samples, 0.02%)</title><rect x="549.4" y="85" width="0.3" height="15.0" fill="rgb(243,173,44)" rx="2" ry="2" />
+<text  x="552.43" y="95.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (150 samples, 0.19%)</title><rect x="542.0" y="85" width="2.3" height="15.0" fill="rgb(221,144,30)" rx="2" ry="2" />
+<text  x="544.99" y="95.5" ></text>
+</g>
+<g >
+<title>gmp_sign (14 samples, 0.02%)</title><rect x="568.4" y="165" width="0.2" height="15.0" fill="rgb(219,109,28)" rx="2" ry="2" />
+<text  x="571.42" y="175.5" ></text>
+</g>
+<g >
+<title>defined (13 samples, 0.02%)</title><rect x="672.3" y="181" width="0.2" height="15.0" fill="rgb(225,219,44)" rx="2" ry="2" />
+<text  x="675.28" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::escapeString (488 samples, 0.63%)</title><rect x="29.2" y="213" width="7.4" height="15.0" fill="rgb(236,10,22)" rx="2" ry="2" />
+<text  x="32.18" y="223.5" ></text>
+</g>
+<g >
+<title>is_array (9 samples, 0.01%)</title><rect x="846.6" y="213" width="0.2" height="15.0" fill="rgb(251,209,35)" rx="2" ry="2" />
+<text  x="849.65" y="223.5" ></text>
+</g>
+<g >
+<title>is_file (8 samples, 0.01%)</title><rect x="687.5" y="149" width="0.1" height="15.0" fill="rgb(252,208,21)" rx="2" ry="2" />
+<text  x="690.52" y="159.5" ></text>
+</g>
+<g >
+<title>socket_create (9 samples, 0.01%)</title><rect x="574.1" y="165" width="0.2" height="15.0" fill="rgb(235,65,30)" rx="2" ry="2" />
+<text  x="577.13" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getL5 (764 samples, 0.99%)</title><rect x="437.5" y="133" width="11.7" height="15.0" fill="rgb(214,57,23)" rx="2" ry="2" />
+<text  x="440.54" y="143.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (117 samples, 0.15%)</title><rect x="832.4" y="181" width="1.7" height="15.0" fill="rgb(246,16,4)" rx="2" ry="2" />
+<text  x="835.36" y="191.5" ></text>
+</g>
+<g >
+<title>explode (13 samples, 0.02%)</title><rect x="734.2" y="213" width="0.2" height="15.0" fill="rgb(229,2,40)" rx="2" ry="2" />
+<text  x="737.19" y="223.5" ></text>
+</g>
+<g >
+<title>basename (43 samples, 0.06%)</title><rect x="548.7" y="85" width="0.6" height="15.0" fill="rgb(207,115,51)" rx="2" ry="2" />
+<text  x="551.68" y="95.5" ></text>
+</g>
+<g >
+<title>is_dir (290 samples, 0.38%)</title><rect x="1083.5" y="197" width="4.4" height="15.0" fill="rgb(242,30,36)" rx="2" ry="2" />
+<text  x="1086.47" y="207.5" ></text>
+</g>
+<g >
+<title>strlen (7 samples, 0.01%)</title><rect x="705.2" y="133" width="0.1" height="15.0" fill="rgb(239,183,37)" rx="2" ry="2" />
+<text  x="708.21" y="143.5" ></text>
+</g>
+<g >
+<title>is_array (19 samples, 0.02%)</title><rect x="67.6" y="197" width="0.3" height="15.0" fill="rgb(245,192,27)" rx="2" ry="2" />
+<text  x="70.59" y="207.5" ></text>
+</g>
+<g >
+<title>getenv (10 samples, 0.01%)</title><rect x="672.7" y="181" width="0.2" height="15.0" fill="rgb(206,187,37)" rx="2" ry="2" />
+<text  x="675.74" y="191.5" ></text>
+</g>
+<g >
+<title>strlen (18 samples, 0.02%)</title><rect x="535.2" y="101" width="0.3" height="15.0" fill="rgb(222,175,2)" rx="2" ry="2" />
+<text  x="538.25" y="111.5" ></text>
+</g>
+<g >
+<title>require_once (20,956 samples, 27.11%)</title><rect x="870.1" y="245" width="319.9" height="15.0" fill="rgb(243,138,51)" rx="2" ry="2" />
+<text  x="873.07" y="255.5" >require_once</text>
+</g>
+<g >
+<title>OCreateType (964 samples, 1.25%)</title><rect x="1150.4" y="165" width="14.7" height="15.0" fill="rgb(254,115,49)" rx="2" ry="2" />
+<text  x="1153.38" y="175.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (14 samples, 0.02%)</title><rect x="443.8" y="53" width="0.3" height="15.0" fill="rgb(233,149,8)" rx="2" ry="2" />
+<text  x="446.84" y="63.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="687.6" y="149" width="0.2" height="15.0" fill="rgb(205,108,9)" rx="2" ry="2" />
+<text  x="690.64" y="159.5" ></text>
+</g>
+<g >
+<title>socket_create (7 samples, 0.01%)</title><rect x="708.5" y="165" width="0.1" height="15.0" fill="rgb(209,47,6)" rx="2" ry="2" />
+<text  x="711.53" y="175.5" ></text>
+</g>
+<g >
+<title>fopen (14 samples, 0.02%)</title><rect x="543.5" y="69" width="0.2" height="15.0" fill="rgb(244,140,28)" rx="2" ry="2" />
+<text  x="546.47" y="79.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,007 samples, 6.48%)</title><rect x="254.2" y="165" width="76.4" height="15.0" fill="rgb(227,172,47)" rx="2" ry="2" />
+<text  x="257.18" y="175.5" >DJBase\T..</text>
+</g>
+<g >
+<title>LogerConnect::send (64 samples, 0.08%)</title><rect x="546.7" y="69" width="1.0" height="15.0" fill="rgb(213,117,13)" rx="2" ry="2" />
+<text  x="549.68" y="79.5" ></text>
+</g>
+<g >
+<title>shell_exec (4,780 samples, 6.18%)</title><rect x="453.3" y="117" width="73.0" height="15.0" fill="rgb(213,146,2)" rx="2" ry="2" />
+<text  x="456.28" y="127.5" >shell_exec</text>
+</g>
+<g >
+<title>basename (26 samples, 0.03%)</title><rect x="77.1" y="213" width="0.3" height="15.0" fill="rgb(231,213,48)" rx="2" ry="2" />
+<text  x="80.05" y="223.5" ></text>
+</g>
+<g >
+<title>require_once (21,815 samples, 28.22%)</title><rect x="857.0" y="261" width="333.0" height="15.0" fill="rgb(214,12,4)" rx="2" ry="2" />
+<text  x="859.95" y="271.5" >require_once</text>
+</g>
+<g >
+<title>ini_set (63 samples, 0.08%)</title><rect x="869.1" y="245" width="1.0" height="15.0" fill="rgb(225,187,2)" rx="2" ry="2" />
+<text  x="872.10" y="255.5" ></text>
+</g>
+<g >
+<title>iconv (450 samples, 0.58%)</title><rect x="672.9" y="181" width="6.9" height="15.0" fill="rgb(230,20,51)" rx="2" ry="2" />
+<text  x="675.89" y="191.5" ></text>
+</g>
+<g >
+<title>fwrite (11 samples, 0.01%)</title><rect x="543.7" y="69" width="0.2" height="15.0" fill="rgb(216,157,54)" rx="2" ry="2" />
+<text  x="546.69" y="79.5" ></text>
+</g>
+<g >
+<title>trim (9 samples, 0.01%)</title><rect x="165.8" y="197" width="0.2" height="15.0" fill="rgb(222,117,23)" rx="2" ry="2" />
+<text  x="168.81" y="207.5" ></text>
+</g>
+<g >
+<title>socket_sendto (11 samples, 0.01%)</title><rect x="690.9" y="117" width="0.1" height="15.0" fill="rgb(214,2,0)" rx="2" ry="2" />
+<text  x="693.88" y="127.5" ></text>
+</g>
+<g >
+<title>filter_var (14 samples, 0.02%)</title><rect x="590.7" y="165" width="0.2" height="15.0" fill="rgb(209,117,31)" rx="2" ry="2" />
+<text  x="593.66" y="175.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="683.5" y="181" width="0.2" height="15.0" fill="rgb(207,33,52)" rx="2" ry="2" />
+<text  x="686.53" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (22 samples, 0.03%)</title><rect x="531.4" y="149" width="0.3" height="15.0" fill="rgb(228,45,2)" rx="2" ry="2" />
+<text  x="534.41" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getClientIp (43 samples, 0.06%)</title><rect x="79.0" y="213" width="0.7" height="15.0" fill="rgb(215,30,13)" rx="2" ry="2" />
+<text  x="82.02" y="223.5" ></text>
+</g>
+<g >
+<title>date (16 samples, 0.02%)</title><rect x="584.0" y="133" width="0.3" height="15.0" fill="rgb(205,177,54)" rx="2" ry="2" />
+<text  x="587.02" y="143.5" ></text>
+</g>
+<g >
+<title>define (182 samples, 0.24%)</title><rect x="1187.2" y="197" width="2.8" height="15.0" fill="rgb(251,166,43)" rx="2" ry="2" />
+<text  x="1190.22" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;__construct (24 samples, 0.03%)</title><rect x="27.3" y="229" width="0.4" height="15.0" fill="rgb(242,189,17)" rx="2" ry="2" />
+<text  x="30.31" y="239.5" ></text>
+</g>
+<g >
+<title>socket_sendto (17 samples, 0.02%)</title><rect x="583.3" y="101" width="0.3" height="15.0" fill="rgb(237,3,4)" rx="2" ry="2" />
+<text  x="586.31" y="111.5" ></text>
+</g>
+<g >
+<title>DJBase\RPC::getInstance (180 samples, 0.23%)</title><rect x="708.8" y="181" width="2.8" height="15.0" fill="rgb(208,157,25)" rx="2" ry="2" />
+<text  x="711.85" y="191.5" ></text>
+</g>
+<g >
+<title>socket_close (7 samples, 0.01%)</title><rect x="553.2" y="117" width="0.1" height="15.0" fill="rgb(213,89,41)" rx="2" ry="2" />
+<text  x="556.20" y="127.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (8 samples, 0.01%)</title><rect x="692.5" y="165" width="0.1" height="15.0" fill="rgb(228,212,47)" rx="2" ry="2" />
+<text  x="695.46" y="175.5" ></text>
+</g>
+<g >
+<title>date (7 samples, 0.01%)</title><rect x="62.6" y="181" width="0.1" height="15.0" fill="rgb(222,20,1)" rx="2" ry="2" />
+<text  x="65.61" y="191.5" ></text>
+</g>
+<g >
+<title>gethostbyname (271 samples, 0.35%)</title><rect x="734.7" y="213" width="4.1" height="15.0" fill="rgb(226,181,12)" rx="2" ry="2" />
+<text  x="737.71" y="223.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;__construct (2,131 samples, 2.76%)</title><rect x="25.5" y="245" width="32.5" height="15.0" fill="rgb(216,213,21)" rx="2" ry="2" />
+<text  x="28.48" y="255.5" >an..</text>
+</g>
+<g >
+<title>define (69 samples, 0.09%)</title><rect x="1165.4" y="181" width="1.1" height="15.0" fill="rgb(242,62,30)" rx="2" ry="2" />
+<text  x="1168.40" y="191.5" ></text>
+</g>
+<g >
+<title>strlen (29 samples, 0.04%)</title><rect x="545.3" y="69" width="0.4" height="15.0" fill="rgb(226,147,31)" rx="2" ry="2" />
+<text  x="548.28" y="79.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="544.2" y="69" width="0.1" height="15.0" fill="rgb(230,138,44)" rx="2" ry="2" />
+<text  x="547.16" y="79.5" ></text>
+</g>
+<g >
+<title>error_get_last (13 samples, 0.02%)</title><rect x="555.4" y="181" width="0.2" height="15.0" fill="rgb(222,70,54)" rx="2" ry="2" />
+<text  x="558.41" y="191.5" ></text>
+</g>
+<g >
+<title>constant (9 samples, 0.01%)</title><rect x="420.4" y="117" width="0.2" height="15.0" fill="rgb(251,82,1)" rx="2" ry="2" />
+<text  x="423.42" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::escapeString (425 samples, 0.55%)</title><rect x="848.4" y="213" width="6.5" height="15.0" fill="rgb(206,101,28)" rx="2" ry="2" />
+<text  x="851.43" y="223.5" ></text>
+</g>
+<g >
+<title>substr (27 samples, 0.03%)</title><rect x="545.7" y="69" width="0.4" height="15.0" fill="rgb(250,119,15)" rx="2" ry="2" />
+<text  x="548.72" y="79.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (7 samples, 0.01%)</title><rect x="65.3" y="165" width="0.1" height="15.0" fill="rgb(233,74,38)" rx="2" ry="2" />
+<text  x="68.34" y="175.5" ></text>
+</g>
+<g >
+<title>explode (17 samples, 0.02%)</title><rect x="672.5" y="181" width="0.2" height="15.0" fill="rgb(243,190,38)" rx="2" ry="2" />
+<text  x="675.48" y="191.5" ></text>
+</g>
+<g >
+<title>gettimeofday (9 samples, 0.01%)</title><rect x="552.1" y="101" width="0.1" height="15.0" fill="rgb(207,80,3)" rx="2" ry="2" />
+<text  x="555.07" y="111.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (11 samples, 0.01%)</title><rect x="62.2" y="181" width="0.2" height="15.0" fill="rgb(210,226,52)" rx="2" ry="2" />
+<text  x="65.24" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;send (1,015 samples, 1.31%)</title><rect x="560.1" y="181" width="15.5" height="15.0" fill="rgb(253,183,25)" rx="2" ry="2" />
+<text  x="563.15" y="191.5" ></text>
+</g>
+<g >
+<title>L5ApiGetRoute (122 samples, 0.16%)</title><rect x="550.1" y="101" width="1.9" height="15.0" fill="rgb(240,104,16)" rx="2" ry="2" />
+<text  x="553.12" y="111.5" ></text>
+</g>
+<g >
+<title>fopen (11 samples, 0.01%)</title><rect x="534.0" y="101" width="0.2" height="15.0" fill="rgb(229,184,40)" rx="2" ry="2" />
+<text  x="537.02" y="111.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (11 samples, 0.01%)</title><rect x="66.5" y="181" width="0.2" height="15.0" fill="rgb(207,69,11)" rx="2" ry="2" />
+<text  x="69.55" y="191.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (55 samples, 0.07%)</title><rect x="65.2" y="181" width="0.8" height="15.0" fill="rgb(243,61,41)" rx="2" ry="2" />
+<text  x="68.17" y="191.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (70 samples, 0.09%)</title><rect x="855.5" y="229" width="1.0" height="15.0" fill="rgb(242,41,29)" rx="2" ry="2" />
+<text  x="858.47" y="239.5" ></text>
+</g>
+<g >
+<title>gethostbyname (112 samples, 0.14%)</title><rect x="255.5" y="149" width="1.7" height="15.0" fill="rgb(227,32,12)" rx="2" ry="2" />
+<text  x="258.54" y="159.5" ></text>
+</g>
+<g >
+<title>define (18 samples, 0.02%)</title><rect x="876.2" y="229" width="0.3" height="15.0" fill="rgb(245,19,43)" rx="2" ry="2" />
+<text  x="879.19" y="239.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::isTestMachine (5,783 samples, 7.48%)</title><rect x="330.6" y="165" width="88.3" height="15.0" fill="rgb(254,132,30)" rx="2" ry="2" />
+<text  x="333.62" y="175.5" >DJBase\Too..</text>
+</g>
+<g >
+<title>filter_var (13 samples, 0.02%)</title><rect x="332.1" y="133" width="0.2" height="15.0" fill="rgb(231,36,24)" rx="2" ry="2" />
+<text  x="335.09" y="143.5" ></text>
+</g>
+<g >
+<title>is_file (17 samples, 0.02%)</title><rect x="724.3" y="149" width="0.2" height="15.0" fill="rgb(244,93,27)" rx="2" ry="2" />
+<text  x="727.25" y="159.5" ></text>
+</g>
+<g >
+<title>basename (7 samples, 0.01%)</title><rect x="703.2" y="117" width="0.1" height="15.0" fill="rgb(248,84,27)" rx="2" ry="2" />
+<text  x="706.17" y="127.5" ></text>
+</g>
+<g >
+<title>socket_set_nonblock (8 samples, 0.01%)</title><rect x="574.6" y="165" width="0.1" height="15.0" fill="rgb(242,0,12)" rx="2" ry="2" />
+<text  x="577.57" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (59 samples, 0.08%)</title><rect x="74.2" y="213" width="0.9" height="15.0" fill="rgb(205,3,7)" rx="2" ry="2" />
+<text  x="77.18" y="223.5" ></text>
+</g>
+<g >
+<title>date (13 samples, 0.02%)</title><rect x="578.8" y="133" width="0.2" height="15.0" fill="rgb(239,70,27)" rx="2" ry="2" />
+<text  x="581.76" y="143.5" ></text>
+</g>
+<g >
+<title>fclose (9 samples, 0.01%)</title><rect x="579.0" y="133" width="0.1" height="15.0" fill="rgb(224,18,53)" rx="2" ry="2" />
+<text  x="581.95" y="143.5" ></text>
+</g>
+<g >
+<title>str_replace (10 samples, 0.01%)</title><rect x="846.8" y="213" width="0.1" height="15.0" fill="rgb(211,0,36)" rx="2" ry="2" />
+<text  x="849.78" y="223.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (8 samples, 0.01%)</title><rect x="443.6" y="69" width="0.1" height="15.0" fill="rgb(248,142,25)" rx="2" ry="2" />
+<text  x="446.55" y="79.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;outputJSON (19,969 samples, 25.84%)</title><rect x="251.1" y="213" width="304.9" height="15.0" fill="rgb(239,30,42)" rx="2" ry="2" />
+<text  x="254.13" y="223.5" >anchor_common-&gt;outputJSON</text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (118 samples, 0.15%)</title><rect x="828.7" y="213" width="1.8" height="15.0" fill="rgb(207,15,18)" rx="2" ry="2" />
+<text  x="831.74" y="223.5" ></text>
+</g>
+<g >
+<title>fopen (11 samples, 0.01%)</title><rect x="687.2" y="149" width="0.1" height="15.0" fill="rgb(213,22,36)" rx="2" ry="2" />
+<text  x="690.17" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getClientIp (28 samples, 0.04%)</title><rect x="253.8" y="165" width="0.4" height="15.0" fill="rgb(249,204,20)" rx="2" ry="2" />
+<text  x="256.75" y="175.5" ></text>
+</g>
+<g >
+<title>socket_sendto (10 samples, 0.01%)</title><rect x="708.6" y="165" width="0.2" height="15.0" fill="rgb(207,41,33)" rx="2" ry="2" />
+<text  x="711.63" y="175.5" ></text>
+</g>
+<g >
+<title>define (205 samples, 0.27%)</title><rect x="1177.2" y="165" width="3.2" height="15.0" fill="rgb(212,224,12)" rx="2" ry="2" />
+<text  x="1180.22" y="175.5" ></text>
+</g>
+<g >
+<title>is_file (9 samples, 0.01%)</title><rect x="73.9" y="197" width="0.2" height="15.0" fill="rgb(205,105,36)" rx="2" ry="2" />
+<text  x="76.92" y="207.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (34 samples, 0.04%)</title><rect x="75.8" y="181" width="0.6" height="15.0" fill="rgb(215,79,6)" rx="2" ry="2" />
+<text  x="78.83" y="191.5" ></text>
+</g>
+<g >
+<title>socket_sendto (13 samples, 0.02%)</title><rect x="65.8" y="149" width="0.2" height="15.0" fill="rgb(219,92,38)" rx="2" ry="2" />
+<text  x="68.82" y="159.5" ></text>
+</g>
+<g >
+<title>socket_sendto (18 samples, 0.02%)</title><rect x="444.1" y="53" width="0.2" height="15.0" fill="rgb(218,210,1)" rx="2" ry="2" />
+<text  x="447.06" y="63.5" ></text>
+</g>
+<g >
+<title>json_encode (7 samples, 0.01%)</title><rect x="586.1" y="149" width="0.1" height="15.0" fill="rgb(231,11,18)" rx="2" ry="2" />
+<text  x="589.05" y="159.5" ></text>
+</g>
+<g >
+<title>microtime (7 samples, 0.01%)</title><rect x="28.1" y="213" width="0.1" height="15.0" fill="rgb(213,56,50)" rx="2" ry="2" />
+<text  x="31.08" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\RPC-&gt;__construct (138 samples, 0.18%)</title><rect x="709.3" y="165" width="2.1" height="15.0" fill="rgb(241,189,25)" rx="2" ry="2" />
+<text  x="712.27" y="175.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (12 samples, 0.02%)</title><rect x="446.0" y="101" width="0.2" height="15.0" fill="rgb(205,19,35)" rx="2" ry="2" />
+<text  x="449.04" y="111.5" ></text>
+</g>
+<g >
+<title>shell_exec (5,146 samples, 6.66%)</title><rect x="593.0" y="165" width="78.6" height="15.0" fill="rgb(225,224,0)" rx="2" ry="2" />
+<text  x="596.05" y="175.5" >shell_exec</text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,532 samples, 7.16%)</title><rect x="166.3" y="197" width="84.4" height="15.0" fill="rgb(209,36,24)" rx="2" ry="2" />
+<text  x="169.26" y="207.5" >DJBase\To..</text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (137 samples, 0.18%)</title><rect x="64.7" y="197" width="2.1" height="15.0" fill="rgb(213,158,31)" rx="2" ry="2" />
+<text  x="67.69" y="207.5" ></text>
+</g>
+<g >
+<title>substr (18 samples, 0.02%)</title><rect x="535.5" y="101" width="0.3" height="15.0" fill="rgb(222,27,44)" rx="2" ry="2" />
+<text  x="538.52" y="111.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (101 samples, 0.13%)</title><rect x="834.1" y="181" width="1.6" height="15.0" fill="rgb(241,95,35)" rx="2" ry="2" />
+<text  x="837.14" y="191.5" ></text>
+</g>
+<g >
+<title>fwrite (9 samples, 0.01%)</title><rect x="440.7" y="85" width="0.1" height="15.0" fill="rgb(229,77,41)" rx="2" ry="2" />
+<text  x="443.68" y="95.5" ></text>
+</g>
+<g >
+<title>constant (8 samples, 0.01%)</title><rect x="702.4" y="69" width="0.2" height="15.0" fill="rgb(207,220,11)" rx="2" ry="2" />
+<text  x="705.45" y="79.5" ></text>
+</g>
+<g >
+<title>gethostname (7 samples, 0.01%)</title><rect x="257.2" y="149" width="0.2" height="15.0" fill="rgb(219,126,33)" rx="2" ry="2" />
+<text  x="260.25" y="159.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (912 samples, 1.18%)</title><rect x="830.5" y="213" width="14.0" height="15.0" fill="rgb(211,124,2)" rx="2" ry="2" />
+<text  x="833.54" y="223.5" ></text>
+</g>
+<g >
+<title>explode (9 samples, 0.01%)</title><rect x="77.7" y="213" width="0.1" height="15.0" fill="rgb(224,34,42)" rx="2" ry="2" />
+<text  x="80.66" y="223.5" ></text>
+</g>
+<g >
+<title>in_array (7 samples, 0.01%)</title><rect x="418.8" y="149" width="0.1" height="15.0" fill="rgb(248,74,13)" rx="2" ry="2" />
+<text  x="421.80" y="159.5" ></text>
+</g>
+<g >
+<title>fwrite (8 samples, 0.01%)</title><rect x="73.7" y="197" width="0.2" height="15.0" fill="rgb(224,143,17)" rx="2" ry="2" />
+<text  x="76.74" y="207.5" ></text>
+</g>
+<g >
+<title>explode (14 samples, 0.02%)</title><rect x="590.5" y="165" width="0.2" height="15.0" fill="rgb(219,225,11)" rx="2" ry="2" />
+<text  x="593.45" y="175.5" ></text>
+</g>
+<g >
+<title>json_encode (10 samples, 0.01%)</title><rect x="555.6" y="197" width="0.2" height="15.0" fill="rgb(228,111,48)" rx="2" ry="2" />
+<text  x="558.61" y="207.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (167 samples, 0.22%)</title><rect x="546.1" y="85" width="2.6" height="15.0" fill="rgb(221,145,53)" rx="2" ry="2" />
+<text  x="549.13" y="95.5" ></text>
+</g>
+<g >
+<title>DJBase\getMicroSec (27 samples, 0.03%)</title><rect x="671.7" y="181" width="0.4" height="15.0" fill="rgb(221,72,31)" rx="2" ry="2" />
+<text  x="674.70" y="191.5" ></text>
+</g>
+<g >
+<title>socket_close (12 samples, 0.02%)</title><rect x="420.6" y="133" width="0.1" height="15.0" fill="rgb(233,210,46)" rx="2" ry="2" />
+<text  x="423.56" y="143.5" ></text>
+</g>
+<g >
+<title>date (7 samples, 0.01%)</title><rect x="73.3" y="197" width="0.1" height="15.0" fill="rgb(250,83,3)" rx="2" ry="2" />
+<text  x="76.25" y="207.5" ></text>
+</g>
+<g >
+<title>explode (11 samples, 0.01%)</title><rect x="875.9" y="213" width="0.1" height="15.0" fill="rgb(212,138,53)" rx="2" ry="2" />
+<text  x="878.88" y="223.5" ></text>
+</g>
+<g >
+<title>round (12 samples, 0.02%)</title><rect x="531.0" y="133" width="0.2" height="15.0" fill="rgb(228,218,19)" rx="2" ry="2" />
+<text  x="534.03" y="143.5" ></text>
+</g>
+<g >
+<title>getmypid (10 samples, 0.01%)</title><rect x="827.9" y="197" width="0.2" height="15.0" fill="rgb(224,172,50)" rx="2" ry="2" />
+<text  x="830.90" y="207.5" ></text>
+</g>
+<g >
+<title>time (10 samples, 0.01%)</title><rect x="842.5" y="181" width="0.1" height="15.0" fill="rgb(231,195,5)" rx="2" ry="2" />
+<text  x="845.46" y="191.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (13 samples, 0.02%)</title><rect x="585.6" y="149" width="0.2" height="15.0" fill="rgb(242,160,15)" rx="2" ry="2" />
+<text  x="588.64" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;write (8,288 samples, 10.72%)</title><rect x="557.2" y="197" width="126.5" height="15.0" fill="rgb(206,102,33)" rx="2" ry="2" />
+<text  x="560.18" y="207.5" >DJBase\DjReport..</text>
+</g>
+<g >
+<title>str_replace (8 samples, 0.01%)</title><rect x="53.8" y="181" width="0.1" height="15.0" fill="rgb(231,86,34)" rx="2" ry="2" />
+<text  x="56.77" y="191.5" ></text>
+</g>
+<g >
+<title>shell_exec (5,507 samples, 7.13%)</title><rect x="334.3" y="133" width="84.1" height="15.0" fill="rgb(205,5,20)" rx="2" ry="2" />
+<text  x="337.32" y="143.5" >shell_exec</text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (14 samples, 0.02%)</title><rect x="691.0" y="149" width="0.3" height="15.0" fill="rgb(209,166,54)" rx="2" ry="2" />
+<text  x="694.04" y="159.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (20 samples, 0.03%)</title><rect x="833.5" y="149" width="0.3" height="15.0" fill="rgb(212,152,19)" rx="2" ry="2" />
+<text  x="836.50" y="159.5" ></text>
+</g>
+<g >
+<title>is_file (12 samples, 0.02%)</title><rect x="63.2" y="181" width="0.2" height="15.0" fill="rgb(235,116,51)" rx="2" ry="2" />
+<text  x="66.22" y="191.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (42 samples, 0.05%)</title><rect x="582.9" y="117" width="0.7" height="15.0" fill="rgb(240,90,2)" rx="2" ry="2" />
+<text  x="585.92" y="127.5" ></text>
+</g>
+<g >
+<title>fwrite (7 samples, 0.01%)</title><rect x="534.2" y="101" width="0.1" height="15.0" fill="rgb(207,204,20)" rx="2" ry="2" />
+<text  x="537.19" y="111.5" ></text>
+</g>
+<g >
+<title>gethostbyname (127 samples, 0.16%)</title><rect x="332.3" y="133" width="1.9" height="15.0" fill="rgb(237,217,15)" rx="2" ry="2" />
+<text  x="335.29" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;send (854 samples, 1.10%)</title><rect x="424.5" y="133" width="13.0" height="15.0" fill="rgb(214,47,8)" rx="2" ry="2" />
+<text  x="427.50" y="143.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (27 samples, 0.03%)</title><rect x="707.8" y="165" width="0.5" height="15.0" fill="rgb(208,66,30)" rx="2" ry="2" />
+<text  x="710.84" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (10 samples, 0.01%)</title><rect x="542.8" y="69" width="0.2" height="15.0" fill="rgb(230,200,8)" rx="2" ry="2" />
+<text  x="545.83" y="79.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (59 samples, 0.08%)</title><rect x="843.4" y="197" width="0.9" height="15.0" fill="rgb(210,206,8)" rx="2" ry="2" />
+<text  x="846.41" y="207.5" ></text>
+</g>
+<g >
+<title>date (13 samples, 0.02%)</title><rect x="843.1" y="197" width="0.2" height="15.0" fill="rgb(237,181,22)" rx="2" ry="2" />
+<text  x="846.07" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;getParam (1,658 samples, 2.15%)</title><rect x="28.6" y="229" width="25.3" height="15.0" fill="rgb(243,16,52)" rx="2" ry="2" />
+<text  x="31.58" y="239.5" >a..</text>
+</g>
+<g >
+<title>sprintf (62 samples, 0.08%)</title><rect x="574.7" y="165" width="0.9" height="15.0" fill="rgb(246,80,38)" rx="2" ry="2" />
+<text  x="577.69" y="175.5" ></text>
+</g>
+<g >
+<title>microtime (7 samples, 0.01%)</title><rect x="711.9" y="165" width="0.1" height="15.0" fill="rgb(229,171,29)" rx="2" ry="2" />
+<text  x="714.90" y="175.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (14 samples, 0.02%)</title><rect x="66.0" y="181" width="0.2" height="15.0" fill="rgb(209,43,29)" rx="2" ry="2" />
+<text  x="69.01" y="191.5" ></text>
+</g>
+<g >
+<title>file_get_contents (34 samples, 0.04%)</title><rect x="70.8" y="213" width="0.5" height="15.0" fill="rgb(232,77,4)" rx="2" ry="2" />
+<text  x="73.81" y="223.5" ></text>
+</g>
+<g >
+<title>ksort (11 samples, 0.01%)</title><rect x="68.1" y="213" width="0.2" height="15.0" fill="rgb(225,151,47)" rx="2" ry="2" />
+<text  x="71.09" y="223.5" ></text>
+</g>
+<g >
+<title>fopen (11 samples, 0.01%)</title><rect x="62.9" y="181" width="0.1" height="15.0" fill="rgb(237,173,8)" rx="2" ry="2" />
+<text  x="65.87" y="191.5" ></text>
+</g>
+<g >
+<title>fwrite (8 samples, 0.01%)</title><rect x="687.3" y="149" width="0.2" height="15.0" fill="rgb(222,71,51)" rx="2" ry="2" />
+<text  x="690.33" y="159.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;matrix_report (2,088 samples, 2.70%)</title><rect x="693.1" y="197" width="31.9" height="15.0" fill="rgb(212,113,7)" rx="2" ry="2" />
+<text  x="696.11" y="207.5" >an..</text>
+</g>
+<g >
+<title>DJBase\Tool::escapeString (372 samples, 0.48%)</title><rect x="849.2" y="197" width="5.7" height="15.0" fill="rgb(238,116,15)" rx="2" ry="2" />
+<text  x="852.18" y="207.5" ></text>
+</g>
+<g >
+<title>str_replace (211 samples, 0.27%)</title><rect x="1161.9" y="149" width="3.2" height="15.0" fill="rgb(216,32,29)" rx="2" ry="2" />
+<text  x="1164.88" y="159.5" ></text>
+</g>
+<g >
+<title>gmp_div (16 samples, 0.02%)</title><rect x="429.9" y="117" width="0.3" height="15.0" fill="rgb(245,201,40)" rx="2" ry="2" />
+<text  x="432.95" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (568 samples, 0.73%)</title><rect x="437.9" y="117" width="8.7" height="15.0" fill="rgb(239,106,0)" rx="2" ry="2" />
+<text  x="440.95" y="127.5" ></text>
+</g>
+<g >
+<title>extension_loaded (11 samples, 0.01%)</title><rect x="1185.2" y="213" width="0.2" height="15.0" fill="rgb(242,70,12)" rx="2" ry="2" />
+<text  x="1188.22" y="223.5" ></text>
+</g>
+<g >
+<title>eval (172 samples, 0.22%)</title><rect x="1159.3" y="149" width="2.6" height="15.0" fill="rgb(245,140,47)" rx="2" ry="2" />
+<text  x="1162.25" y="159.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;start (52,239 samples, 67.59%)</title><rect x="59.1" y="261" width="797.5" height="15.0" fill="rgb(212,148,4)" rx="2" ry="2" />
+<text  x="62.08" y="271.5" >anchor_common-&gt;start</text>
+</g>
+<g >
+<title>gethostbyname (134 samples, 0.17%)</title><rect x="590.9" y="165" width="2.0" height="15.0" fill="rgb(230,76,39)" rx="2" ry="2" />
+<text  x="593.88" y="175.5" ></text>
+</g>
+<g >
+<title>http_build_query (13 samples, 0.02%)</title><rect x="855.3" y="229" width="0.2" height="15.0" fill="rgb(225,177,24)" rx="2" ry="2" />
+<text  x="858.27" y="239.5" ></text>
+</g>
+<g >
+<title>strlen (9 samples, 0.01%)</title><rect x="531.2" y="133" width="0.2" height="15.0" fill="rgb(206,125,4)" rx="2" ry="2" />
+<text  x="534.21" y="143.5" ></text>
+</g>
+<g >
+<title>gettimeofday (8 samples, 0.01%)</title><rect x="449.1" y="117" width="0.1" height="15.0" fill="rgb(240,128,52)" rx="2" ry="2" />
+<text  x="452.08" y="127.5" ></text>
+</g>
+<g >
+<title>is_null (7 samples, 0.01%)</title><rect x="711.4" y="165" width="0.1" height="15.0" fill="rgb(231,51,12)" rx="2" ry="2" />
+<text  x="714.38" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (125 samples, 0.16%)</title><rect x="687.8" y="165" width="1.9" height="15.0" fill="rgb(228,98,12)" rx="2" ry="2" />
+<text  x="690.76" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (160 samples, 0.21%)</title><rect x="577.6" y="149" width="2.4" height="15.0" fill="rgb(236,142,15)" rx="2" ry="2" />
+<text  x="580.57" y="159.5" ></text>
+</g>
+<g >
+<title>basename (71 samples, 0.09%)</title><rect x="844.5" y="213" width="1.0" height="15.0" fill="rgb(253,37,49)" rx="2" ry="2" />
+<text  x="847.46" y="223.5" ></text>
+</g>
+<g >
+<title>{main} (77,291 samples, 100.00%)</title><rect x="10.0" y="277" width="1180.0" height="15.0" fill="rgb(249,160,9)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" >{main}</text>
+</g>
+<g >
+<title>all (77,291 samples, 100%)</title><rect x="10.0" y="293" width="1180.0" height="15.0" fill="rgb(248,2,25)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (52 samples, 0.07%)</title><rect x="75.6" y="197" width="0.8" height="15.0" fill="rgb(242,61,35)" rx="2" ry="2" />
+<text  x="78.56" y="207.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (7 samples, 0.01%)</title><rect x="582.8" y="117" width="0.1" height="15.0" fill="rgb(245,104,3)" rx="2" ry="2" />
+<text  x="585.82" y="127.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="534.5" y="101" width="0.1" height="15.0" fill="rgb(205,109,11)" rx="2" ry="2" />
+<text  x="537.48" y="111.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;getTableFieldTypes (8 samples, 0.01%)</title><rect x="566.3" y="165" width="0.1" height="15.0" fill="rgb(209,184,44)" rx="2" ry="2" />
+<text  x="569.28" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,053 samples, 6.54%)</title><rect x="449.2" y="133" width="77.1" height="15.0" fill="rgb(247,49,48)" rx="2" ry="2" />
+<text  x="452.20" y="143.5" >DJBase\T..</text>
+</g>
+<g >
+<title>DJBase\Tool::error (538 samples, 0.70%)</title><rect x="684.7" y="197" width="8.3" height="15.0" fill="rgb(215,12,17)" rx="2" ry="2" />
+<text  x="687.74" y="207.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (138 samples, 0.18%)</title><rect x="689.7" y="165" width="2.1" height="15.0" fill="rgb(222,79,39)" rx="2" ry="2" />
+<text  x="692.67" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getL5 (785 samples, 1.02%)</title><rect x="540.2" y="117" width="12.0" height="15.0" fill="rgb(237,177,47)" rx="2" ry="2" />
+<text  x="543.22" y="127.5" ></text>
+</g>
+<g >
+<title>json_encode (13 samples, 0.02%)</title><rect x="554.6" y="133" width="0.2" height="15.0" fill="rgb(236,185,49)" rx="2" ry="2" />
+<text  x="557.56" y="143.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (64 samples, 0.08%)</title><rect x="582.6" y="133" width="1.0" height="15.0" fill="rgb(228,167,45)" rx="2" ry="2" />
+<text  x="585.59" y="143.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;DJBase\{closure:/data/website/api7web/htdocs/daoju/v3/api/hx/commphplib/base/BaseApp.class.php:71-91} (813 samples, 1.05%)</title><rect x="712.5" y="165" width="12.4" height="15.0" fill="rgb(242,228,20)" rx="2" ry="2" />
+<text  x="715.48" y="175.5" ></text>
+</g>
+<g >
+<title>rand (26 samples, 0.03%)</title><rect x="573.6" y="165" width="0.4" height="15.0" fill="rgb(241,86,28)" rx="2" ry="2" />
+<text  x="576.63" y="175.5" ></text>
+</g>
+<g >
+<title>is_file (28 samples, 0.04%)</title><rect x="828.1" y="197" width="0.4" height="15.0" fill="rgb(254,208,35)" rx="2" ry="2" />
+<text  x="831.05" y="207.5" ></text>
+</g>
+<g >
+<title>date (9 samples, 0.01%)</title><rect x="543.2" y="69" width="0.1" height="15.0" fill="rgb(214,58,25)" rx="2" ry="2" />
+<text  x="546.17" y="79.5" ></text>
+</g>
+<g >
+<title>htmlspecialchars (90 samples, 0.12%)</title><rect x="33.1" y="181" width="1.3" height="15.0" fill="rgb(205,56,5)" rx="2" ry="2" />
+<text  x="36.07" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getRawQuery (181 samples, 0.23%)</title><rect x="68.7" y="229" width="2.7" height="15.0" fill="rgb(236,7,22)" rx="2" ry="2" />
+<text  x="71.66" y="239.5" ></text>
+</g>
+<g >
+<title>gmp_mod (14 samples, 0.02%)</title><rect x="431.0" y="117" width="0.3" height="15.0" fill="rgb(238,33,29)" rx="2" ry="2" />
+<text  x="434.05" y="127.5" ></text>
+</g>
+<g >
+<title>strlen (29 samples, 0.04%)</title><rect x="581.1" y="133" width="0.5" height="15.0" fill="rgb(215,87,19)" rx="2" ry="2" />
+<text  x="584.12" y="143.5" ></text>
+</g>
+<g >
+<title>basename (24 samples, 0.03%)</title><rect x="66.8" y="197" width="0.3" height="15.0" fill="rgb(235,213,3)" rx="2" ry="2" />
+<text  x="69.78" y="207.5" ></text>
+</g>
+<g >
+<title>random_int (11 samples, 0.01%)</title><rect x="708.3" y="165" width="0.1" height="15.0" fill="rgb(244,198,38)" rx="2" ry="2" />
+<text  x="711.25" y="175.5" ></text>
+</g>
+<g >
+<title>explode (12 samples, 0.02%)</title><rect x="331.9" y="133" width="0.2" height="15.0" fill="rgb(248,57,20)" rx="2" ry="2" />
+<text  x="334.90" y="143.5" ></text>
+</g>
+<g >
+<title>strlen (27 samples, 0.03%)</title><rect x="829.7" y="197" width="0.5" height="15.0" fill="rgb(226,203,26)" rx="2" ry="2" />
+<text  x="832.75" y="207.5" ></text>
+</g>
+<g >
+<title>gethostname (8 samples, 0.01%)</title><rect x="453.2" y="117" width="0.1" height="15.0" fill="rgb(218,94,15)" rx="2" ry="2" />
+<text  x="456.15" y="127.5" ></text>
+</g>
+<g >
+<title>socket_sendto (10 samples, 0.01%)</title><rect x="553.4" y="117" width="0.2" height="15.0" fill="rgb(245,209,12)" rx="2" ry="2" />
+<text  x="556.41" y="127.5" ></text>
+</g>
+<g >
+<title>str_replace (68 samples, 0.09%)</title><rect x="35.5" y="181" width="1.0" height="15.0" fill="rgb(234,125,18)" rx="2" ry="2" />
+<text  x="38.47" y="191.5" ></text>
+</g>
+<g >
+<title>substr (14 samples, 0.02%)</title><rect x="684.5" y="181" width="0.2" height="15.0" fill="rgb(212,51,40)" rx="2" ry="2" />
+<text  x="687.53" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (1,756 samples, 2.27%)</title><rect x="820.2" y="229" width="26.9" height="15.0" fill="rgb(254,204,46)" rx="2" ry="2" />
+<text  x="823.25" y="239.5" >D..</text>
+</g>
+<g >
+<title>file_exists (21 samples, 0.03%)</title><rect x="709.7" y="149" width="0.4" height="15.0" fill="rgb(206,97,25)" rx="2" ry="2" />
+<text  x="712.75" y="159.5" ></text>
+</g>
+<g >
+<title>is_numeric (13 samples, 0.02%)</title><rect x="569.4" y="165" width="0.2" height="15.0" fill="rgb(227,155,0)" rx="2" ry="2" />
+<text  x="572.41" y="175.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (12 samples, 0.02%)</title><rect x="690.7" y="117" width="0.2" height="15.0" fill="rgb(223,192,46)" rx="2" ry="2" />
+<text  x="693.69" y="127.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (13 samples, 0.02%)</title><rect x="76.4" y="197" width="0.1" height="15.0" fill="rgb(212,48,24)" rx="2" ry="2" />
+<text  x="79.35" y="207.5" ></text>
+</g>
+<g >
+<title>strlen (26 samples, 0.03%)</title><rect x="442.0" y="85" width="0.4" height="15.0" fill="rgb(208,194,24)" rx="2" ry="2" />
+<text  x="444.99" y="95.5" ></text>
+</g>
+<g >
+<title>set_exception_handler (7 samples, 0.01%)</title><rect x="57.3" y="229" width="0.1" height="15.0" fill="rgb(250,114,11)" rx="2" ry="2" />
+<text  x="60.28" y="239.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (16 samples, 0.02%)</title><rect x="538.3" y="117" width="0.3" height="15.0" fill="rgb(230,84,45)" rx="2" ry="2" />
+<text  x="541.34" y="127.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (22 samples, 0.03%)</title><rect x="584.3" y="133" width="0.4" height="15.0" fill="rgb(216,156,1)" rx="2" ry="2" />
+<text  x="587.33" y="143.5" ></text>
+</g>
+<g >
+<title>preg_match (10 samples, 0.01%)</title><rect x="555.8" y="197" width="0.1" height="15.0" fill="rgb(251,133,5)" rx="2" ry="2" />
+<text  x="558.76" y="207.5" ></text>
+</g>
+<g >
+<title>time (7 samples, 0.01%)</title><rect x="583.7" y="117" width="0.2" height="15.0" fill="rgb(208,126,12)" rx="2" ry="2" />
+<text  x="586.75" y="127.5" ></text>
+</g>
+<g >
+<title>byte_of_int (20 samples, 0.03%)</title><rect x="1165.1" y="181" width="0.3" height="15.0" fill="rgb(213,168,14)" rx="2" ry="2" />
+<text  x="1168.10" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (116 samples, 0.15%)</title><rect x="532.8" y="117" width="1.8" height="15.0" fill="rgb(229,94,11)" rx="2" ry="2" />
+<text  x="535.83" y="127.5" ></text>
+</g>
+<g >
+<title>microtime (7 samples, 0.01%)</title><rect x="672.0" y="165" width="0.1" height="15.0" fill="rgb(241,212,34)" rx="2" ry="2" />
+<text  x="675.01" y="175.5" ></text>
+</g>
+<g >
+<title>in_array (19 samples, 0.02%)</title><rect x="679.8" y="181" width="0.3" height="15.0" fill="rgb(246,150,40)" rx="2" ry="2" />
+<text  x="682.76" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getMilliSec (27 samples, 0.03%)</title><rect x="711.6" y="181" width="0.4" height="15.0" fill="rgb(246,201,32)" rx="2" ry="2" />
+<text  x="714.59" y="191.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;report (8,779 samples, 11.36%)</title><rect x="421.2" y="165" width="134.0" height="15.0" fill="rgb(224,5,53)" rx="2" ry="2" />
+<text  x="424.19" y="175.5" >anchor_common-&gt;r..</text>
+</g>
+<g >
+<title>Util::GET_LOCAL_IP (59 samples, 0.08%)</title><rect x="847.4" y="213" width="0.9" height="15.0" fill="rgb(250,21,27)" rx="2" ry="2" />
+<text  x="850.36" y="223.5" ></text>
+</g>
+<g >
+<title>file_exists (13 samples, 0.02%)</title><rect x="855.0" y="229" width="0.2" height="15.0" fill="rgb(224,188,6)" rx="2" ry="2" />
+<text  x="858.00" y="239.5" ></text>
+</g>
+<g >
+<title>strrpos (8 samples, 0.01%)</title><rect x="728.6" y="213" width="0.1" height="15.0" fill="rgb(228,118,41)" rx="2" ry="2" />
+<text  x="731.60" y="223.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (53 samples, 0.07%)</title><rect x="702.1" y="101" width="0.8" height="15.0" fill="rgb(207,49,18)" rx="2" ry="2" />
+<text  x="705.05" y="111.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (15 samples, 0.02%)</title><rect x="704.6" y="133" width="0.3" height="15.0" fill="rgb(213,123,43)" rx="2" ry="2" />
+<text  x="707.63" y="143.5" ></text>
+</g>
+<g >
+<title>strtolower (16 samples, 0.02%)</title><rect x="731.0" y="213" width="0.2" height="15.0" fill="rgb(211,4,36)" rx="2" ry="2" />
+<text  x="733.97" y="223.5" ></text>
+</g>
+<g >
+<title>L5ApiGetRoute (147 samples, 0.19%)</title><rect x="705.3" y="149" width="2.3" height="15.0" fill="rgb(208,85,4)" rx="2" ry="2" />
+<text  x="708.32" y="159.5" ></text>
+</g>
+<g >
+<title>pack (228 samples, 0.29%)</title><rect x="432.2" y="117" width="3.5" height="15.0" fill="rgb(224,78,46)" rx="2" ry="2" />
+<text  x="435.18" y="127.5" ></text>
+</g>
+<g >
+<title>socket_close (8 samples, 0.01%)</title><rect x="435.8" y="117" width="0.1" height="15.0" fill="rgb(206,109,22)" rx="2" ry="2" />
+<text  x="438.75" y="127.5" ></text>
+</g>
+<g >
+<title>json_encode (7 samples, 0.01%)</title><rect x="446.4" y="101" width="0.1" height="15.0" fill="rgb(228,135,26)" rx="2" ry="2" />
+<text  x="449.44" y="111.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (51 samples, 0.07%)</title><rect x="552.3" y="117" width="0.7" height="15.0" fill="rgb(220,120,17)" rx="2" ry="2" />
+<text  x="555.27" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (396 samples, 0.51%)</title><rect x="822.7" y="213" width="6.0" height="15.0" fill="rgb(215,85,40)" rx="2" ry="2" />
+<text  x="825.69" y="223.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (249 samples, 0.32%)</title><rect x="831.9" y="197" width="3.8" height="15.0" fill="rgb(224,25,41)" rx="2" ry="2" />
+<text  x="834.88" y="207.5" ></text>
+</g>
+<g >
+<title>socket_sendto (22 samples, 0.03%)</title><rect x="436.0" y="117" width="0.3" height="15.0" fill="rgb(225,203,8)" rx="2" ry="2" />
+<text  x="439.01" y="127.5" ></text>
+</g>
+<g >
+<title>closedir (21 samples, 0.03%)</title><rect x="1083.1" y="197" width="0.4" height="15.0" fill="rgb(243,107,15)" rx="2" ry="2" />
+<text  x="1086.15" y="207.5" ></text>
+</g>
+<g >
+<title>dirname (21 samples, 0.03%)</title><rect x="868.4" y="245" width="0.4" height="15.0" fill="rgb(239,189,48)" rx="2" ry="2" />
+<text  x="871.45" y="255.5" ></text>
+</g>
+<g >
+<title>str_replace (8 samples, 0.01%)</title><rect x="724.8" y="149" width="0.1" height="15.0" fill="rgb(250,17,18)" rx="2" ry="2" />
+<text  x="727.77" y="159.5" ></text>
+</g>
+<g >
+<title>explode (7 samples, 0.01%)</title><rect x="704.9" y="133" width="0.1" height="15.0" fill="rgb(245,0,11)" rx="2" ry="2" />
+<text  x="707.94" y="143.5" ></text>
+</g>
+<g >
+<title>require_once (5,827 samples, 7.54%)</title><rect x="1093.3" y="197" width="89.0" height="15.0" fill="rgb(224,167,47)" rx="2" ry="2" />
+<text  x="1096.33" y="207.5" >require_once</text>
+</g>
+<g >
+<title>strpos (11 samples, 0.01%)</title><rect x="79.5" y="197" width="0.2" height="15.0" fill="rgb(212,229,8)" rx="2" ry="2" />
+<text  x="82.51" y="207.5" ></text>
+</g>
+<g >
+<title>defined (7 samples, 0.01%)</title><rect x="726.1" y="229" width="0.1" height="15.0" fill="rgb(240,161,35)" rx="2" ry="2" />
+<text  x="729.08" y="239.5" ></text>
+</g>
+<g >
+<title>gethostbyname (141 samples, 0.18%)</title><rect x="81.6" y="197" width="2.1" height="15.0" fill="rgb(220,170,48)" rx="2" ry="2" />
+<text  x="84.59" y="207.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (74 samples, 0.10%)</title><rect x="701.7" y="117" width="1.2" height="15.0" fill="rgb(206,18,3)" rx="2" ry="2" />
+<text  x="704.73" y="127.5" ></text>
+</g>
+<g >
+<title>spl_autoload_call (824 samples, 1.07%)</title><rect x="712.3" y="181" width="12.6" height="15.0" fill="rgb(219,102,48)" rx="2" ry="2" />
+<text  x="715.31" y="191.5" ></text>
+</g>
+<g >
+<title>microtime (8 samples, 0.01%)</title><rect x="526.6" y="117" width="0.1" height="15.0" fill="rgb(234,197,13)" rx="2" ry="2" />
+<text  x="529.62" y="127.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;prepare (8,538 samples, 11.05%)</title><rect x="726.3" y="245" width="130.3" height="15.0" fill="rgb(211,3,31)" rx="2" ry="2" />
+<text  x="729.27" y="255.5" >anchor_common-&gt;p..</text>
+</g>
+<g >
+<title>basename (20 samples, 0.03%)</title><rect x="725.0" y="197" width="0.3" height="15.0" fill="rgb(253,90,1)" rx="2" ry="2" />
+<text  x="727.98" y="207.5" ></text>
+</g>
+<g >
+<title>pack (263 samples, 0.34%)</title><rect x="569.6" y="165" width="4.0" height="15.0" fill="rgb(208,77,50)" rx="2" ry="2" />
+<text  x="572.61" y="175.5" ></text>
+</g>
+<g >
+<title>ucwords (18 samples, 0.02%)</title><rect x="732.8" y="213" width="0.2" height="15.0" fill="rgb(241,25,48)" rx="2" ry="2" />
+<text  x="735.77" y="223.5" ></text>
+</g>
+<g >
+<title>gmp_sign (15 samples, 0.02%)</title><rect x="431.3" y="117" width="0.2" height="15.0" fill="rgb(254,182,0)" rx="2" ry="2" />
+<text  x="434.26" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (433 samples, 0.56%)</title><rect x="71.4" y="229" width="6.6" height="15.0" fill="rgb(214,137,5)" rx="2" ry="2" />
+<text  x="74.42" y="239.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (461 samples, 0.60%)</title><rect x="531.9" y="133" width="7.0" height="15.0" fill="rgb(232,69,43)" rx="2" ry="2" />
+<text  x="534.89" y="143.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (13 samples, 0.02%)</title><rect x="555.2" y="165" width="0.2" height="15.0" fill="rgb(214,157,48)" rx="2" ry="2" />
+<text  x="558.21" y="175.5" ></text>
+</g>
+<g >
+<title>filter_var (12 samples, 0.02%)</title><rect x="255.4" y="149" width="0.1" height="15.0" fill="rgb(253,229,18)" rx="2" ry="2" />
+<text  x="258.36" y="159.5" ></text>
+</g>
+<g >
+<title>strpos (7 samples, 0.01%)</title><rect x="548.6" y="69" width="0.1" height="15.0" fill="rgb(246,77,17)" rx="2" ry="2" />
+<text  x="551.57" y="79.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (12 samples, 0.02%)</title><rect x="67.2" y="197" width="0.2" height="15.0" fill="rgb(220,211,5)" rx="2" ry="2" />
+<text  x="70.24" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (12 samples, 0.02%)</title><rect x="697.6" y="117" width="0.1" height="15.0" fill="rgb(213,176,30)" rx="2" ry="2" />
+<text  x="700.56" y="127.5" ></text>
+</g>
+<g >
+<title>define (67 samples, 0.09%)</title><rect x="1181.3" y="149" width="1.0" height="15.0" fill="rgb(217,129,42)" rx="2" ry="2" />
+<text  x="1184.27" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (662 samples, 0.86%)</title><rect x="576.1" y="165" width="10.1" height="15.0" fill="rgb(222,15,14)" rx="2" ry="2" />
+<text  x="579.11" y="175.5" ></text>
+</g>
+<g >
+<title>trim (8 samples, 0.01%)</title><rect x="250.6" y="181" width="0.1" height="15.0" fill="rgb(206,191,32)" rx="2" ry="2" />
+<text  x="253.59" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::isTestMachine (5,579 samples, 7.22%)</title><rect x="166.0" y="213" width="85.1" height="15.0" fill="rgb(223,171,13)" rx="2" ry="2" />
+<text  x="168.95" y="223.5" >DJBase\Too..</text>
+</g>
+<g >
+<title>socket_set_nonblock (9 samples, 0.01%)</title><rect x="834.0" y="149" width="0.1" height="15.0" fill="rgb(254,67,33)" rx="2" ry="2" />
+<text  x="837.00" y="159.5" ></text>
+</g>
+<g >
+<title>L5ApiGetRoute (367 samples, 0.47%)</title><rect x="836.8" y="165" width="5.6" height="15.0" fill="rgb(245,52,2)" rx="2" ry="2" />
+<text  x="839.77" y="175.5" ></text>
+</g>
+<g >
+<title>basename (11 samples, 0.01%)</title><rect x="824.8" y="197" width="0.1" height="15.0" fill="rgb(252,188,10)" rx="2" ry="2" />
+<text  x="827.75" y="207.5" ></text>
+</g>
+<g >
+<title>explode (12 samples, 0.02%)</title><rect x="167.2" y="181" width="0.2" height="15.0" fill="rgb(245,200,4)" rx="2" ry="2" />
+<text  x="170.20" y="191.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (45 samples, 0.06%)</title><rect x="547.0" y="53" width="0.7" height="15.0" fill="rgb(207,161,21)" rx="2" ry="2" />
+<text  x="549.97" y="63.5" ></text>
+</g>
+<g >
+<title>filesize (13 samples, 0.02%)</title><rect x="826.3" y="197" width="0.2" height="15.0" fill="rgb(207,103,23)" rx="2" ry="2" />
+<text  x="829.29" y="207.5" ></text>
+</g>
+<g >
+<title>strlen (30 samples, 0.04%)</title><rect x="700.2" y="117" width="0.5" height="15.0" fill="rgb(212,223,47)" rx="2" ry="2" />
+<text  x="703.24" y="127.5" ></text>
+</g>
+<g >
+<title>require_once (19 samples, 0.02%)</title><rect x="53.5" y="181" width="0.3" height="15.0" fill="rgb(217,160,28)" rx="2" ry="2" />
+<text  x="56.48" y="191.5" ></text>
+</g>
+<g >
+<title>spl_autoload_register (15 samples, 0.02%)</title><rect x="57.4" y="229" width="0.2" height="15.0" fill="rgb(244,119,52)" rx="2" ry="2" />
+<text  x="60.39" y="239.5" ></text>
+</g>
+<g >
+<title>L5ApiGetRoute (181 samples, 0.23%)</title><rect x="586.2" y="165" width="2.8" height="15.0" fill="rgb(220,86,1)" rx="2" ry="2" />
+<text  x="589.22" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (620 samples, 0.80%)</title><rect x="540.6" y="101" width="9.5" height="15.0" fill="rgb(229,156,4)" rx="2" ry="2" />
+<text  x="543.65" y="111.5" ></text>
+</g>
+<g >
+<title>is_file (10 samples, 0.01%)</title><rect x="53.3" y="181" width="0.2" height="15.0" fill="rgb(238,77,18)" rx="2" ry="2" />
+<text  x="56.33" y="191.5" ></text>
+</g>
+<g >
+<title>socket_close (7 samples, 0.01%)</title><rect x="708.4" y="165" width="0.1" height="15.0" fill="rgb(243,44,46)" rx="2" ry="2" />
+<text  x="711.42" y="175.5" ></text>
+</g>
+<g >
+<title>constant (7 samples, 0.01%)</title><rect x="833.7" y="133" width="0.1" height="15.0" fill="rgb(230,223,47)" rx="2" ry="2" />
+<text  x="836.70" y="143.5" ></text>
+</g>
+<g >
+<title>preg_match (131 samples, 0.17%)</title><rect x="54.6" y="213" width="2.0" height="15.0" fill="rgb(247,6,7)" rx="2" ry="2" />
+<text  x="57.58" y="223.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (135 samples, 0.17%)</title><rect x="528.9" y="133" width="2.0" height="15.0" fill="rgb(236,88,3)" rx="2" ry="2" />
+<text  x="531.86" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (24 samples, 0.03%)</title><rect x="824.4" y="197" width="0.4" height="15.0" fill="rgb(249,182,25)" rx="2" ry="2" />
+<text  x="827.39" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;checkAuth (43,690 samples, 56.53%)</title><rect x="59.3" y="245" width="667.0" height="15.0" fill="rgb(253,156,10)" rx="2" ry="2" />
+<text  x="62.25" y="255.5" >anchor_common-&gt;checkAuth</text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (15 samples, 0.02%)</title><rect x="547.7" y="69" width="0.2" height="15.0" fill="rgb(228,26,17)" rx="2" ry="2" />
+<text  x="550.66" y="79.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="698.8" y="117" width="0.1" height="15.0" fill="rgb(227,175,37)" rx="2" ry="2" />
+<text  x="701.80" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::error (470 samples, 0.61%)</title><rect x="531.7" y="149" width="7.2" height="15.0" fill="rgb(231,215,52)" rx="2" ry="2" />
+<text  x="534.75" y="159.5" ></text>
+</g>
+<g >
+<title>gmp_init (79 samples, 0.10%)</title><rect x="566.9" y="165" width="1.2" height="15.0" fill="rgb(218,138,34)" rx="2" ry="2" />
+<text  x="569.91" y="175.5" ></text>
+</g>
+<g >
+<title>shell_exec (4,793 samples, 6.20%)</title><rect x="257.4" y="149" width="73.1" height="15.0" fill="rgb(248,63,25)" rx="2" ry="2" />
+<text  x="260.36" y="159.5" >shell_exec</text>
+</g>
+<g >
+<title>Socket::is_swoole (12 samples, 0.02%)</title><rect x="536.8" y="69" width="0.1" height="15.0" fill="rgb(231,108,4)" rx="2" ry="2" />
+<text  x="539.76" y="79.5" ></text>
+</g>
+<g >
+<title>shell_exec (5,370 samples, 6.95%)</title><rect x="83.8" y="197" width="82.0" height="15.0" fill="rgb(237,201,28)" rx="2" ry="2" />
+<text  x="86.83" y="207.5" >shell_exec</text>
+</g>
+<g >
+<title>filter_var (23 samples, 0.03%)</title><rect x="81.2" y="197" width="0.4" height="15.0" fill="rgb(241,60,54)" rx="2" ry="2" />
+<text  x="84.24" y="207.5" ></text>
+</g>
+<g >
+<title>socket_sendto (42 samples, 0.05%)</title><rect x="835.0" y="165" width="0.7" height="15.0" fill="rgb(238,152,41)" rx="2" ry="2" />
+<text  x="838.04" y="175.5" ></text>
+</g>
+<g >
+<title>strpos (10 samples, 0.01%)</title><rect x="844.3" y="197" width="0.2" height="15.0" fill="rgb(245,31,21)" rx="2" ry="2" />
+<text  x="847.31" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (75 samples, 0.10%)</title><rect x="63.5" y="197" width="1.2" height="15.0" fill="rgb(207,198,33)" rx="2" ry="2" />
+<text  x="66.54" y="207.5" ></text>
+</g>
+<g >
+<title>getenv (7 samples, 0.01%)</title><rect x="250.9" y="181" width="0.1" height="15.0" fill="rgb(224,107,3)" rx="2" ry="2" />
+<text  x="253.93" y="191.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (64 samples, 0.08%)</title><rect x="443.4" y="85" width="0.9" height="15.0" fill="rgb(205,177,52)" rx="2" ry="2" />
+<text  x="446.35" y="95.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;getServerIp (9 samples, 0.01%)</title><rect x="566.1" y="165" width="0.1" height="15.0" fill="rgb(209,214,9)" rx="2" ry="2" />
+<text  x="569.05" y="175.5" ></text>
+</g>
+<g >
+<title>require_once (302 samples, 0.39%)</title><rect x="1185.4" y="213" width="4.6" height="15.0" fill="rgb(242,166,12)" rx="2" ry="2" />
+<text  x="1188.39" y="223.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (12 samples, 0.02%)</title><rect x="691.5" y="149" width="0.2" height="15.0" fill="rgb(212,120,16)" rx="2" ry="2" />
+<text  x="694.53" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,739 samples, 7.43%)</title><rect x="330.9" y="149" width="87.6" height="15.0" fill="rgb(216,39,3)" rx="2" ry="2" />
+<text  x="333.85" y="159.5" >DJBase\Too..</text>
+</g>
+<g >
+<title>LogerConnect::send (55 samples, 0.07%)</title><rect x="690.2" y="149" width="0.8" height="15.0" fill="rgb(230,24,9)" rx="2" ry="2" />
+<text  x="693.20" y="159.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;addReportDtl (7 samples, 0.01%)</title><rect x="538.9" y="149" width="0.1" height="15.0" fill="rgb(254,213,25)" rx="2" ry="2" />
+<text  x="541.92" y="159.5" ></text>
+</g>
+<g >
+<title>basename (55 samples, 0.07%)</title><rect x="584.7" y="149" width="0.9" height="15.0" fill="rgb(205,14,33)" rx="2" ry="2" />
+<text  x="587.74" y="159.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;write (7,171 samples, 9.28%)</title><rect x="421.9" y="149" width="109.5" height="15.0" fill="rgb(207,169,6)" rx="2" ry="2" />
+<text  x="424.93" y="159.5" >DJBase\DjRepo..</text>
+</g>
+<g >
+<title>defined (14 samples, 0.02%)</title><rect x="526.9" y="133" width="0.2" height="15.0" fill="rgb(253,76,34)" rx="2" ry="2" />
+<text  x="529.89" y="143.5" ></text>
+</g>
+<g >
+<title>random_int (7 samples, 0.01%)</title><rect x="530.9" y="133" width="0.1" height="15.0" fill="rgb(242,29,52)" rx="2" ry="2" />
+<text  x="533.92" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (67 samples, 0.09%)</title><rect x="683.7" y="197" width="1.0" height="15.0" fill="rgb(243,31,37)" rx="2" ry="2" />
+<text  x="686.72" y="207.5" ></text>
+</g>
+<g >
+<title>LogerConnect::send (58 samples, 0.08%)</title><rect x="536.2" y="101" width="0.9" height="15.0" fill="rgb(219,178,43)" rx="2" ry="2" />
+<text  x="539.24" y="111.5" ></text>
+</g>
+<g >
+<title>DJBase\RPC::getInstance (27 samples, 0.03%)</title><rect x="553.7" y="133" width="0.4" height="15.0" fill="rgb(229,119,19)" rx="2" ry="2" />
+<text  x="556.69" y="143.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (43 samples, 0.06%)</title><rect x="443.7" y="69" width="0.6" height="15.0" fill="rgb(242,108,53)" rx="2" ry="2" />
+<text  x="446.67" y="79.5" ></text>
+</g>
+<g >
+<title>fopen (62 samples, 0.08%)</title><rect x="826.5" y="197" width="0.9" height="15.0" fill="rgb(240,176,45)" rx="2" ry="2" />
+<text  x="829.49" y="207.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (7 samples, 0.01%)</title><rect x="536.4" y="85" width="0.1" height="15.0" fill="rgb(234,220,48)" rx="2" ry="2" />
+<text  x="539.44" y="95.5" ></text>
+</g>
+<g >
+<title>DJBase\DjReport-&gt;getServerIp (7 samples, 0.01%)</title><rect x="429.7" y="117" width="0.1" height="15.0" fill="rgb(212,201,48)" rx="2" ry="2" />
+<text  x="432.66" y="127.5" ></text>
+</g>
+<g >
+<title>spl_autoload_call (1,120 samples, 1.45%)</title><rect x="36.8" y="213" width="17.1" height="15.0" fill="rgb(212,150,40)" rx="2" ry="2" />
+<text  x="39.79" y="223.5" ></text>
+</g>
+<g >
+<title>explode (20 samples, 0.03%)</title><rect x="527.1" y="133" width="0.3" height="15.0" fill="rgb(216,151,13)" rx="2" ry="2" />
+<text  x="530.11" y="143.5" ></text>
+</g>
+<g >
+<title>socket_create (7 samples, 0.01%)</title><rect x="553.3" y="117" width="0.1" height="15.0" fill="rgb(244,204,19)" rx="2" ry="2" />
+<text  x="556.31" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (102 samples, 0.13%)</title><rect x="441.2" y="101" width="1.5" height="15.0" fill="rgb(227,144,17)" rx="2" ry="2" />
+<text  x="444.19" y="111.5" ></text>
+</g>
+<g >
+<title>clearstatcache (15 samples, 0.02%)</title><rect x="824.9" y="197" width="0.2" height="15.0" fill="rgb(217,213,41)" rx="2" ry="2" />
+<text  x="827.92" y="207.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (18 samples, 0.02%)</title><rect x="845.8" y="213" width="0.2" height="15.0" fill="rgb(249,24,17)" rx="2" ry="2" />
+<text  x="848.76" y="223.5" ></text>
+</g>
+<g >
+<title>htmlspecialchars (62 samples, 0.08%)</title><rect x="852.0" y="181" width="0.9" height="15.0" fill="rgb(244,82,15)" rx="2" ry="2" />
+<text  x="854.99" y="191.5" ></text>
+</g>
+<g >
+<title>socket_create (13 samples, 0.02%)</title><rect x="833.8" y="149" width="0.2" height="15.0" fill="rgb(218,125,40)" rx="2" ry="2" />
+<text  x="836.81" y="159.5" ></text>
+</g>
+<g >
+<title>filter_var (21 samples, 0.03%)</title><rect x="734.4" y="213" width="0.3" height="15.0" fill="rgb(253,113,27)" rx="2" ry="2" />
+<text  x="737.39" y="223.5" ></text>
+</g>
+<g >
+<title>array_merge (11 samples, 0.01%)</title><rect x="36.6" y="213" width="0.2" height="15.0" fill="rgb(254,27,11)" rx="2" ry="2" />
+<text  x="39.63" y="223.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;__construct (8 samples, 0.01%)</title><rect x="833.0" y="165" width="0.1" height="15.0" fill="rgb(227,173,31)" rx="2" ry="2" />
+<text  x="835.95" y="175.5" ></text>
+</g>
+<g >
+<title>fwrite (10 samples, 0.01%)</title><rect x="698.4" y="117" width="0.1" height="15.0" fill="rgb(238,119,15)" rx="2" ry="2" />
+<text  x="701.39" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (153 samples, 0.20%)</title><rect x="696.6" y="133" width="2.3" height="15.0" fill="rgb(252,38,23)" rx="2" ry="2" />
+<text  x="699.59" y="143.5" ></text>
+</g>
+<g >
+<title>json_encode (25 samples, 0.03%)</title><rect x="680.3" y="181" width="0.4" height="15.0" fill="rgb(236,223,49)" rx="2" ry="2" />
+<text  x="683.28" y="191.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (29 samples, 0.04%)</title><rect x="834.6" y="165" width="0.4" height="15.0" fill="rgb(219,134,16)" rx="2" ry="2" />
+<text  x="837.60" y="175.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (22 samples, 0.03%)</title><rect x="703.4" y="117" width="0.4" height="15.0" fill="rgb(233,51,10)" rx="2" ry="2" />
+<text  x="706.43" y="127.5" ></text>
+</g>
+<g >
+<title>is_file (12 samples, 0.02%)</title><rect x="440.9" y="85" width="0.2" height="15.0" fill="rgb(241,145,42)" rx="2" ry="2" />
+<text  x="443.88" y="95.5" ></text>
+</g>
+<g >
+<title>basename (15 samples, 0.02%)</title><rect x="842.8" y="197" width="0.3" height="15.0" fill="rgb(218,31,36)" rx="2" ry="2" />
+<text  x="845.84" y="207.5" ></text>
+</g>
+<g >
+<title>is_file (8 samples, 0.01%)</title><rect x="534.4" y="101" width="0.1" height="15.0" fill="rgb(242,223,37)" rx="2" ry="2" />
+<text  x="537.36" y="111.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (19 samples, 0.02%)</title><rect x="702.3" y="85" width="0.3" height="15.0" fill="rgb(212,118,9)" rx="2" ry="2" />
+<text  x="705.28" y="95.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="441.1" y="85" width="0.1" height="15.0" fill="rgb(237,99,12)" rx="2" ry="2" />
+<text  x="444.06" y="95.5" ></text>
+</g>
+<g >
+<title>opendir (45 samples, 0.06%)</title><rect x="1087.9" y="197" width="0.7" height="15.0" fill="rgb(214,155,52)" rx="2" ry="2" />
+<text  x="1090.89" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;validBaseParams (176 samples, 0.23%)</title><rect x="53.9" y="229" width="2.7" height="15.0" fill="rgb(223,189,18)" rx="2" ry="2" />
+<text  x="56.89" y="239.5" ></text>
+</g>
+<g >
+<title>socket_close (7 samples, 0.01%)</title><rect x="574.0" y="165" width="0.1" height="15.0" fill="rgb(206,108,23)" rx="2" ry="2" />
+<text  x="577.02" y="175.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_describe (15 samples, 0.02%)</title><rect x="842.6" y="197" width="0.2" height="15.0" fill="rgb(238,49,12)" rx="2" ry="2" />
+<text  x="845.62" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;errorHandler (70 samples, 0.09%)</title><rect x="58.0" y="245" width="1.1" height="15.0" fill="rgb(212,130,4)" rx="2" ry="2" />
+<text  x="61.01" y="255.5" ></text>
+</g>
+<g >
+<title>define (22 samples, 0.03%)</title><rect x="856.6" y="261" width="0.4" height="15.0" fill="rgb(209,41,52)" rx="2" ry="2" />
+<text  x="859.62" y="271.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;connect (70 samples, 0.09%)</title><rect x="833.1" y="165" width="1.0" height="15.0" fill="rgb(240,216,32)" rx="2" ry="2" />
+<text  x="836.07" y="175.5" ></text>
+</g>
+<g >
+<title>strlen (18 samples, 0.02%)</title><rect x="64.2" y="181" width="0.2" height="15.0" fill="rgb(235,89,22)" rx="2" ry="2" />
+<text  x="67.17" y="191.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (7 samples, 0.01%)</title><rect x="701.9" y="101" width="0.2" height="15.0" fill="rgb(211,126,29)" rx="2" ry="2" />
+<text  x="704.95" y="111.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (19 samples, 0.02%)</title><rect x="583.6" y="133" width="0.3" height="15.0" fill="rgb(245,120,7)" rx="2" ry="2" />
+<text  x="586.57" y="143.5" ></text>
+</g>
+<g >
+<title>CheckTools::get_ip_and_port_from_l5 (394 samples, 0.51%)</title><rect x="836.4" y="181" width="6.1" height="15.0" fill="rgb(245,130,47)" rx="2" ry="2" />
+<text  x="839.45" y="191.5" ></text>
+</g>
+<g >
+<title>debug_backtrace (12 samples, 0.02%)</title><rect x="725.9" y="213" width="0.2" height="15.0" fill="rgb(254,25,13)" rx="2" ry="2" />
+<text  x="728.90" y="223.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;report (11,129 samples, 14.40%)</title><rect x="556.0" y="213" width="169.9" height="15.0" fill="rgb(250,1,31)" rx="2" ry="2" />
+<text  x="558.99" y="223.5" >anchor_common-&gt;report</text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (170 samples, 0.22%)</title><rect x="442.7" y="101" width="2.6" height="15.0" fill="rgb(239,173,1)" rx="2" ry="2" />
+<text  x="445.74" y="111.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;matrix_report (1,034 samples, 1.34%)</title><rect x="539.0" y="149" width="15.8" height="15.0" fill="rgb(253,40,12)" rx="2" ry="2" />
+<text  x="542.03" y="159.5" ></text>
+</g>
+<g >
+<title>sprintf (72 samples, 0.09%)</title><rect x="436.4" y="117" width="1.1" height="15.0" fill="rgb(247,118,23)" rx="2" ry="2" />
+<text  x="439.44" y="127.5" ></text>
+</g>
+<g >
+<title>OCreateTypes (1,023 samples, 1.32%)</title><rect x="1149.5" y="181" width="15.6" height="15.0" fill="rgb(226,86,53)" rx="2" ry="2" />
+<text  x="1152.48" y="191.5" ></text>
+</g>
+<g >
+<title>md5 (19 samples, 0.02%)</title><rect x="68.3" y="213" width="0.2" height="15.0" fill="rgb(250,142,51)" rx="2" ry="2" />
+<text  x="71.26" y="223.5" ></text>
+</g>
+<g >
+<title>basename (41 samples, 0.05%)</title><rect x="445.3" y="101" width="0.7" height="15.0" fill="rgb(211,157,22)" rx="2" ry="2" />
+<text  x="448.34" y="111.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;initLogger (54 samples, 0.07%)</title><rect x="728.0" y="229" width="0.8" height="15.0" fill="rgb(209,39,4)" rx="2" ry="2" />
+<text  x="731.01" y="239.5" ></text>
+</g>
+<g >
+<title>str_replace (67 samples, 0.09%)</title><rect x="853.8" y="181" width="1.1" height="15.0" fill="rgb(237,166,21)" rx="2" ry="2" />
+<text  x="856.84" y="191.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;__construct (79 samples, 0.10%)</title><rect x="847.1" y="229" width="1.2" height="15.0" fill="rgb(214,168,38)" rx="2" ry="2" />
+<text  x="850.06" y="239.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;getParam (441 samples, 0.57%)</title><rect x="848.3" y="229" width="6.7" height="15.0" fill="rgb(211,18,52)" rx="2" ry="2" />
+<text  x="851.26" y="239.5" ></text>
+</g>
+<g >
+<title>microtime (9 samples, 0.01%)</title><rect x="876.0" y="213" width="0.2" height="15.0" fill="rgb(238,217,22)" rx="2" ry="2" />
+<text  x="879.05" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getL5 (890 samples, 1.15%)</title><rect x="575.6" y="181" width="13.6" height="15.0" fill="rgb(208,152,23)" rx="2" ry="2" />
+<text  x="578.64" y="191.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;fatalHandler (19,838 samples, 25.67%)</title><rect x="252.7" y="197" width="302.9" height="15.0" fill="rgb(242,51,48)" rx="2" ry="2" />
+<text  x="255.74" y="207.5" >anchor_common-&gt;fatalHandler</text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (129 samples, 0.17%)</title><rect x="75.1" y="213" width="2.0" height="15.0" fill="rgb(230,113,27)" rx="2" ry="2" />
+<text  x="78.08" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (111 samples, 0.14%)</title><rect x="686.1" y="165" width="1.7" height="15.0" fill="rgb(249,37,46)" rx="2" ry="2" />
+<text  x="689.07" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (528 samples, 0.68%)</title><rect x="684.9" y="181" width="8.1" height="15.0" fill="rgb(239,206,48)" rx="2" ry="2" />
+<text  x="687.89" y="191.5" ></text>
+</g>
+<g >
+<title>fopen (11 samples, 0.01%)</title><rect x="73.6" y="197" width="0.1" height="15.0" fill="rgb(228,132,37)" rx="2" ry="2" />
+<text  x="76.57" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,706 samples, 7.38%)</title><rect x="733.0" y="229" width="87.2" height="15.0" fill="rgb(216,194,38)" rx="2" ry="2" />
+<text  x="736.04" y="239.5" >DJBase\Too..</text>
+</g>
+<g >
+<title>strlen (17 samples, 0.02%)</title><rect x="828.5" y="197" width="0.2" height="15.0" fill="rgb(205,173,25)" rx="2" ry="2" />
+<text  x="831.48" y="207.5" ></text>
+</g>
+<g >
+<title>strlen (8 samples, 0.01%)</title><rect x="846.9" y="213" width="0.2" height="15.0" fill="rgb(212,80,53)" rx="2" ry="2" />
+<text  x="849.94" y="223.5" ></text>
+</g>
+<g >
+<title>substr (16 samples, 0.02%)</title><rect x="64.4" y="181" width="0.3" height="15.0" fill="rgb(212,29,39)" rx="2" ry="2" />
+<text  x="67.44" y="191.5" ></text>
+</g>
+<g >
+<title>strlen (16 samples, 0.02%)</title><rect x="684.3" y="181" width="0.2" height="15.0" fill="rgb(206,19,27)" rx="2" ry="2" />
+<text  x="687.28" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::escapeString (417 samples, 0.54%)</title><rect x="30.1" y="197" width="6.4" height="15.0" fill="rgb(232,202,14)" rx="2" ry="2" />
+<text  x="33.14" y="207.5" ></text>
+</g>
+<g >
+<title>fclose (8 samples, 0.01%)</title><rect x="73.4" y="197" width="0.1" height="15.0" fill="rgb(240,65,52)" rx="2" ry="2" />
+<text  x="76.36" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\getMicroSec (38 samples, 0.05%)</title><rect x="875.6" y="229" width="0.6" height="15.0" fill="rgb(241,102,39)" rx="2" ry="2" />
+<text  x="878.61" y="239.5" ></text>
+</g>
+<g >
+<title>substr (35 samples, 0.05%)</title><rect x="689.1" y="149" width="0.6" height="15.0" fill="rgb(219,199,31)" rx="2" ry="2" />
+<text  x="692.14" y="159.5" ></text>
+</g>
+<g >
+<title>strtoupper (7 samples, 0.01%)</title><rect x="68.5" y="213" width="0.2" height="15.0" fill="rgb(235,155,38)" rx="2" ry="2" />
+<text  x="71.55" y="223.5" ></text>
+</g>
+<g >
+<title>file_exists (15 samples, 0.02%)</title><rect x="54.4" y="213" width="0.2" height="15.0" fill="rgb(235,45,3)" rx="2" ry="2" />
+<text  x="57.35" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (149 samples, 0.19%)</title><rect x="698.9" y="133" width="2.3" height="15.0" fill="rgb(250,143,47)" rx="2" ry="2" />
+<text  x="701.92" y="143.5" ></text>
+</g>
+<g >
+<title>fopen (12 samples, 0.02%)</title><rect x="698.2" y="117" width="0.2" height="15.0" fill="rgb(254,5,25)" rx="2" ry="2" />
+<text  x="701.20" y="127.5" ></text>
+</g>
+<g >
+<title>fwrite (30 samples, 0.04%)</title><rect x="827.4" y="197" width="0.5" height="15.0" fill="rgb(235,164,24)" rx="2" ry="2" />
+<text  x="830.44" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (134 samples, 0.17%)</title><rect x="580.0" y="149" width="2.1" height="15.0" fill="rgb(226,125,15)" rx="2" ry="2" />
+<text  x="583.01" y="159.5" ></text>
+</g>
+<g >
+<title>filter_var (19 samples, 0.02%)</title><rect x="450.8" y="117" width="0.3" height="15.0" fill="rgb(232,155,28)" rx="2" ry="2" />
+<text  x="453.80" y="127.5" ></text>
+</g>
+<g >
+<title>socket_sendto (19 samples, 0.02%)</title><rect x="702.6" y="85" width="0.3" height="15.0" fill="rgb(210,144,52)" rx="2" ry="2" />
+<text  x="705.57" y="95.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (23 samples, 0.03%)</title><rect x="444.9" y="85" width="0.4" height="15.0" fill="rgb(247,89,51)" rx="2" ry="2" />
+<text  x="447.91" y="95.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (15 samples, 0.02%)</title><rect x="702.9" y="117" width="0.2" height="15.0" fill="rgb(221,122,6)" rx="2" ry="2" />
+<text  x="705.86" y="127.5" ></text>
+</g>
+<g >
+<title>json_encode (12 samples, 0.02%)</title><rect x="555.0" y="149" width="0.2" height="15.0" fill="rgb(235,56,4)" rx="2" ry="2" />
+<text  x="558.03" y="159.5" ></text>
+</g>
+<g >
+<title>strcasecmp (8 samples, 0.01%)</title><rect x="79.4" y="197" width="0.1" height="15.0" fill="rgb(205,91,34)" rx="2" ry="2" />
+<text  x="82.39" y="207.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (13 samples, 0.02%)</title><rect x="583.1" y="101" width="0.2" height="15.0" fill="rgb(247,160,29)" rx="2" ry="2" />
+<text  x="586.11" y="111.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;writePlatLog (173 samples, 0.22%)</title><rect x="701.2" y="133" width="2.6" height="15.0" fill="rgb(233,178,46)" rx="2" ry="2" />
+<text  x="704.20" y="143.5" ></text>
+</g>
+<g >
+<title>count (14 samples, 0.02%)</title><rect x="845.5" y="213" width="0.3" height="15.0" fill="rgb(248,228,27)" rx="2" ry="2" />
+<text  x="848.55" y="223.5" ></text>
+</g>
+<g >
+<title>gmp_strval (51 samples, 0.07%)</title><rect x="568.6" y="165" width="0.8" height="15.0" fill="rgb(245,158,16)" rx="2" ry="2" />
+<text  x="571.63" y="175.5" ></text>
+</g>
+<g >
+<title>round (21 samples, 0.03%)</title><rect x="683.2" y="181" width="0.3" height="15.0" fill="rgb(253,151,26)" rx="2" ry="2" />
+<text  x="686.21" y="191.5" ></text>
+</g>
+<g >
+<title>strrchr (192 samples, 0.25%)</title><rect x="1182.3" y="197" width="2.9" height="15.0" fill="rgb(246,165,54)" rx="2" ry="2" />
+<text  x="1185.29" y="207.5" ></text>
+</g>
+<g >
+<title>explode (11 samples, 0.01%)</title><rect x="846.5" y="213" width="0.1" height="15.0" fill="rgb(221,194,27)" rx="2" ry="2" />
+<text  x="849.48" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getTestMachine (22 samples, 0.03%)</title><rect x="418.5" y="149" width="0.3" height="15.0" fill="rgb(242,5,20)" rx="2" ry="2" />
+<text  x="421.47" y="159.5" ></text>
+</g>
+<g >
+<title>parse_ini_file (147 samples, 0.19%)</title><rect x="680.7" y="181" width="2.2" height="15.0" fill="rgb(205,182,20)" rx="2" ry="2" />
+<text  x="683.66" y="191.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (673 samples, 0.87%)</title><rect x="695.0" y="149" width="10.3" height="15.0" fill="rgb(253,175,4)" rx="2" ry="2" />
+<text  x="698.04" y="159.5" ></text>
+</g>
+<g >
+<title>socket_sendto (16 samples, 0.02%)</title><rect x="547.4" y="37" width="0.3" height="15.0" fill="rgb(254,152,45)" rx="2" ry="2" />
+<text  x="550.41" y="47.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (9 samples, 0.01%)</title><rect x="76.9" y="197" width="0.1" height="15.0" fill="rgb(222,141,26)" rx="2" ry="2" />
+<text  x="79.85" y="207.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;showResult (19,808 samples, 25.63%)</title><rect x="253.0" y="181" width="302.4" height="15.0" fill="rgb(253,203,45)" rx="2" ry="2" />
+<text  x="256.00" y="191.5" >anchor_common-&gt;showResult</text>
+</g>
+<g >
+<title>require_once (1,037 samples, 1.34%)</title><rect x="1166.5" y="181" width="15.8" height="15.0" fill="rgb(210,23,30)" rx="2" ry="2" />
+<text  x="1169.46" y="191.5" ></text>
+</g>
+<g >
+<title>is_array (8 samples, 0.01%)</title><rect x="36.5" y="197" width="0.1" height="15.0" fill="rgb(227,36,30)" rx="2" ry="2" />
+<text  x="39.50" y="207.5" ></text>
+</g>
+<g >
+<title>explode (14 samples, 0.02%)</title><rect x="450.6" y="117" width="0.2" height="15.0" fill="rgb(217,120,6)" rx="2" ry="2" />
+<text  x="453.59" y="127.5" ></text>
+</g>
+<g >
+<title>is_array (59 samples, 0.08%)</title><rect x="852.9" y="181" width="0.9" height="15.0" fill="rgb(219,97,30)" rx="2" ry="2" />
+<text  x="855.94" y="191.5" ></text>
+</g>
+<g >
+<title>defined (29 samples, 0.04%)</title><rect x="846.0" y="213" width="0.5" height="15.0" fill="rgb(224,180,7)" rx="2" ry="2" />
+<text  x="849.03" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;writeLog (132 samples, 0.17%)</title><rect x="61.5" y="197" width="2.0" height="15.0" fill="rgb(231,51,1)" rx="2" ry="2" />
+<text  x="64.53" y="207.5" ></text>
+</g>
+<g >
+<title>require_once (17 samples, 0.02%)</title><rect x="724.5" y="149" width="0.3" height="15.0" fill="rgb(237,30,3)" rx="2" ry="2" />
+<text  x="727.51" y="159.5" ></text>
+</g>
+<g >
+<title>json_encode (11 samples, 0.01%)</title><rect x="420.7" y="149" width="0.2" height="15.0" fill="rgb(234,35,8)" rx="2" ry="2" />
+<text  x="423.74" y="159.5" ></text>
+</g>
+<g >
+<title>substr (7 samples, 0.01%)</title><rect x="728.7" y="213" width="0.1" height="15.0" fill="rgb(250,153,3)" rx="2" ry="2" />
+<text  x="731.72" y="223.5" ></text>
+</g>
+<g >
+<title>DJBase\RPC-&gt;udp_call (931 samples, 1.20%)</title><rect x="539.5" y="133" width="14.2" height="15.0" fill="rgb(236,132,10)" rx="2" ry="2" />
+<text  x="542.47" y="143.5" ></text>
+</g>
+<g >
+<title>gmp_strval (30 samples, 0.04%)</title><rect x="431.5" y="117" width="0.4" height="15.0" fill="rgb(219,162,4)" rx="2" ry="2" />
+<text  x="434.49" y="127.5" ></text>
+</g>
+<g >
+<title>DJBase\RPC-&gt;udp_call (982 samples, 1.27%)</title><rect x="693.9" y="181" width="14.9" height="15.0" fill="rgb(221,226,41)" rx="2" ry="2" />
+<text  x="696.85" y="191.5" ></text>
+</g>
+<g >
+<title>substr (33 samples, 0.04%)</title><rect x="700.7" y="117" width="0.5" height="15.0" fill="rgb(253,130,4)" rx="2" ry="2" />
+<text  x="703.69" y="127.5" ></text>
+</g>
+<g >
+<title>pack_plat_log (22 samples, 0.03%)</title><rect x="548.2" y="69" width="0.4" height="15.0" fill="rgb(227,228,31)" rx="2" ry="2" />
+<text  x="551.24" y="79.5" ></text>
+</g>
+<g >
+<title>date (60 samples, 0.08%)</title><rect x="825.1" y="197" width="1.0" height="15.0" fill="rgb(213,45,49)" rx="2" ry="2" />
+<text  x="828.15" y="207.5" ></text>
+</g>
+<g >
+<title>json_encode (7 samples, 0.01%)</title><rect x="711.5" y="165" width="0.1" height="15.0" fill="rgb(208,21,30)" rx="2" ry="2" />
+<text  x="714.49" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Logger-&gt;getDescribe (9 samples, 0.01%)</title><rect x="439.9" y="85" width="0.1" height="15.0" fill="rgb(233,28,4)" rx="2" ry="2" />
+<text  x="442.89" y="95.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;__destruct (52 samples, 0.07%)</title><rect x="419.9" y="149" width="0.8" height="15.0" fill="rgb(242,64,46)" rx="2" ry="2" />
+<text  x="422.95" y="159.5" ></text>
+</g>
+<g >
+<title>defined (13 samples, 0.02%)</title><rect x="876.5" y="229" width="0.2" height="15.0" fill="rgb(223,137,49)" rx="2" ry="2" />
+<text  x="879.46" y="239.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (15 samples, 0.02%)</title><rect x="444.3" y="85" width="0.3" height="15.0" fill="rgb(214,116,18)" rx="2" ry="2" />
+<text  x="447.33" y="95.5" ></text>
+</g>
+<g >
+<title>clearstatcache (7 samples, 0.01%)</title><rect x="62.5" y="181" width="0.1" height="15.0" fill="rgb(210,102,44)" rx="2" ry="2" />
+<text  x="65.50" y="191.5" ></text>
+</g>
+<g >
+<title>get_local_ip (48 samples, 0.06%)</title><rect x="847.5" y="197" width="0.8" height="15.0" fill="rgb(227,109,4)" rx="2" ry="2" />
+<text  x="850.53" y="207.5" ></text>
+</g>
+<g >
+<title>gethostname (10 samples, 0.01%)</title><rect x="738.8" y="213" width="0.2" height="15.0" fill="rgb(207,83,12)" rx="2" ry="2" />
+<text  x="741.85" y="223.5" ></text>
+</g>
+<g >
+<title>is_file (13 samples, 0.02%)</title><rect x="528.5" y="133" width="0.1" height="15.0" fill="rgb(217,156,49)" rx="2" ry="2" />
+<text  x="531.45" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::warning (53 samples, 0.07%)</title><rect x="58.3" y="229" width="0.8" height="15.0" fill="rgb(228,114,30)" rx="2" ry="2" />
+<text  x="61.27" y="239.5" ></text>
+</g>
+<g >
+<title>gmp_init (56 samples, 0.07%)</title><rect x="430.2" y="117" width="0.8" height="15.0" fill="rgb(228,19,7)" rx="2" ry="2" />
+<text  x="433.19" y="127.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (37 samples, 0.05%)</title><rect x="65.4" y="165" width="0.6" height="15.0" fill="rgb(232,175,18)" rx="2" ry="2" />
+<text  x="68.45" y="175.5" ></text>
+</g>
+<g >
+<title>strlen (9 samples, 0.01%)</title><rect x="63.4" y="181" width="0.1" height="15.0" fill="rgb(213,144,48)" rx="2" ry="2" />
+<text  x="66.40" y="191.5" ></text>
+</g>
+<g >
+<title>ceil (10 samples, 0.01%)</title><rect x="712.0" y="181" width="0.2" height="15.0" fill="rgb(213,84,22)" rx="2" ry="2" />
+<text  x="715.01" y="191.5" ></text>
+</g>
+<g >
+<title>Socket::is_swoole (12 samples, 0.02%)</title><rect x="76.0" y="165" width="0.2" height="15.0" fill="rgb(225,24,44)" rx="2" ry="2" />
+<text  x="78.98" y="175.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;addReportDtl (10 samples, 0.01%)</title><rect x="693.0" y="197" width="0.1" height="15.0" fill="rgb(240,165,48)" rx="2" ry="2" />
+<text  x="695.95" y="207.5" ></text>
+</g>
+<g >
+<title>gethostname (8 samples, 0.01%)</title><rect x="592.9" y="165" width="0.1" height="15.0" fill="rgb(224,144,11)" rx="2" ry="2" />
+<text  x="595.92" y="175.5" ></text>
+</g>
+<g >
+<title>anchor_common-&gt;showResult (42,448 samples, 54.92%)</title><rect x="78.0" y="229" width="648.1" height="15.0" fill="rgb(253,154,16)" rx="2" ry="2" />
+<text  x="81.03" y="239.5" >anchor_common-&gt;showResult</text>
+</g>
+<g >
+<title>gethostbyname (135 samples, 0.17%)</title><rect x="451.1" y="117" width="2.1" height="15.0" fill="rgb(210,112,36)" rx="2" ry="2" />
+<text  x="454.09" y="127.5" ></text>
+</g>
+<g >
+<title>readdir (311 samples, 0.40%)</title><rect x="1088.6" y="197" width="4.7" height="15.0" fill="rgb(254,188,28)" rx="2" ry="2" />
+<text  x="1091.58" y="207.5" ></text>
+</g>
+<g >
+<title>random_int (10 samples, 0.01%)</title><rect x="553.0" y="117" width="0.2" height="15.0" fill="rgb(206,143,29)" rx="2" ry="2" />
+<text  x="556.05" y="127.5" ></text>
+</g>
+<g >
+<title>in_array (15 samples, 0.02%)</title><rect x="528.2" y="133" width="0.2" height="15.0" fill="rgb(232,161,14)" rx="2" ry="2" />
+<text  x="531.16" y="143.5" ></text>
+</g>
+<g >
+<title>shell_exec (5,311 samples, 6.87%)</title><rect x="739.0" y="213" width="81.1" height="15.0" fill="rgb(225,108,54)" rx="2" ry="2" />
+<text  x="742.00" y="223.5" >shell_exec</text>
+</g>
+<g >
+<title>DJBase\Tool::getServerIp (5,402 samples, 6.99%)</title><rect x="589.2" y="181" width="82.5" height="15.0" fill="rgb(243,215,43)" rx="2" ry="2" />
+<text  x="592.23" y="191.5" >DJBase\To..</text>
+</g>
+<g >
+<title>file_exists (14 samples, 0.02%)</title><rect x="728.4" y="213" width="0.2" height="15.0" fill="rgb(208,194,36)" rx="2" ry="2" />
+<text  x="731.39" y="223.5" ></text>
+</g>
+<g >
+<title>getmypid (9 samples, 0.01%)</title><rect x="843.3" y="197" width="0.1" height="15.0" fill="rgb(233,160,38)" rx="2" ry="2" />
+<text  x="846.27" y="207.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getMilliSec (25 samples, 0.03%)</title><rect x="554.1" y="133" width="0.4" height="15.0" fill="rgb(211,71,16)" rx="2" ry="2" />
+<text  x="557.10" y="143.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::log (44 samples, 0.06%)</title><rect x="58.4" y="213" width="0.7" height="15.0" fill="rgb(216,168,54)" rx="2" ry="2" />
+<text  x="61.41" y="223.5" ></text>
+</g>
+<g >
+<title>fwrite (10 samples, 0.01%)</title><rect x="579.4" y="133" width="0.2" height="15.0" fill="rgb(205,100,46)" rx="2" ry="2" />
+<text  x="582.41" y="143.5" ></text>
+</g>
+<g >
+<title>getenv (7 samples, 0.01%)</title><rect x="418.7" y="133" width="0.1" height="15.0" fill="rgb(247,122,4)" rx="2" ry="2" />
+<text  x="421.70" y="143.5" ></text>
+</g>
+<g >
+<title>fclose (15 samples, 0.02%)</title><rect x="826.1" y="197" width="0.2" height="15.0" fill="rgb(218,6,30)" rx="2" ry="2" />
+<text  x="829.07" y="207.5" ></text>
+</g>
+<g >
+<title>explode (72 samples, 0.09%)</title><rect x="69.7" y="213" width="1.1" height="15.0" fill="rgb(214,1,54)" rx="2" ry="2" />
+<text  x="72.71" y="223.5" ></text>
+</g>
+<g >
+<title>error_reporting (22 samples, 0.03%)</title><rect x="868.8" y="245" width="0.3" height="15.0" fill="rgb(223,48,25)" rx="2" ry="2" />
+<text  x="871.77" y="255.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (78 samples, 0.10%)</title><rect x="534.6" y="117" width="1.2" height="15.0" fill="rgb(222,224,16)" rx="2" ry="2" />
+<text  x="537.60" y="127.5" ></text>
+</g>
+<g >
+<title>trim (13 samples, 0.02%)</title><rect x="57.8" y="229" width="0.2" height="15.0" fill="rgb(242,39,53)" rx="2" ry="2" />
+<text  x="60.82" y="239.5" ></text>
+</g>
+<g >
+<title>LogerConnect::getConnect (8 samples, 0.01%)</title><rect x="546.8" y="53" width="0.2" height="15.0" fill="rgb(218,78,48)" rx="2" ry="2" />
+<text  x="549.85" y="63.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::getL5 (861 samples, 1.11%)</title><rect x="694.6" y="165" width="13.2" height="15.0" fill="rgb(229,84,0)" rx="2" ry="2" />
+<text  x="697.62" y="175.5" ></text>
+</g>
+<g >
+<title>DJBase\Tool::endWith (121 samples, 0.16%)</title><rect x="544.3" y="85" width="1.8" height="15.0" fill="rgb(243,50,51)" rx="2" ry="2" />
+<text  x="547.28" y="95.5" ></text>
+</g>
+<g >
+<title>Logger-&gt;get_connect_ip (454 samples, 0.59%)</title><rect x="835.7" y="197" width="6.9" height="15.0" fill="rgb(254,169,6)" rx="2" ry="2" />
+<text  x="838.68" y="207.5" ></text>
+</g>
+<g >
+<title>UdpDgram-&gt;send (38 samples, 0.05%)</title><rect x="536.5" y="85" width="0.6" height="15.0" fill="rgb(227,57,42)" rx="2" ry="2" />
+<text  x="539.54" y="95.5" ></text>
+</g>
+</g>
+</svg>
